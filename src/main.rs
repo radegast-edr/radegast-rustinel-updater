@@ -132,11 +132,39 @@ fn main() -> Result<()> {
         return Ok(());
     }
     
-    info!("Starting auto-updater daemon...");
+    info!(
+        "Starting auto-updater daemon (check interval: {}s / {:.1}h)...",
+        config.check_interval.as_secs(),
+        config.check_interval.as_secs_f64() / 3600.0
+    );
+    
+    // 1. Run immediate update check during startup
+    info!("Running initial update check on startup...");
+    if let Err(e) = update_cycle(&config) {
+        error!("Initial startup update check failed: {:?}", e);
+    } else {
+        info!("Initial startup update check completed successfully.");
+    }
+    info!(
+        "Next update check scheduled in {} seconds ({:.1} hours).",
+        config.check_interval.as_secs(),
+        config.check_interval.as_secs_f64() / 3600.0
+    );
+    
+    // 2. Periodic loop: wait 1 day (check_interval), then run update check
     loop {
-        if let Err(e) = update_cycle(&config) {
-            error!("Update cycle failed: {:?}", e);
-        }
         std::thread::sleep(config.check_interval);
+        
+        info!("Running scheduled periodic update check...");
+        if let Err(e) = update_cycle(&config) {
+            error!("Scheduled update check failed: {:?}", e);
+        } else {
+            info!("Scheduled update check completed successfully.");
+        }
+        info!(
+            "Next update check scheduled in {} seconds ({:.1} hours).",
+            config.check_interval.as_secs(),
+            config.check_interval.as_secs_f64() / 3600.0
+        );
     }
 }
