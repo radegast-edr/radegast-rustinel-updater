@@ -1,0 +1,45 @@
+[package]
+name = "radegast-rustinel-updater"
+version = "0.1.0"
+edition = "2021"
+description = "Secure auto-updater service for Radegast Rustinel EDR sensor"
+license = "Apache-2.0"
+rust-version = "1.82"
+
+[dependencies]
+# HTTP client with pure-Rust TLS
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "blocking", "json"] }
+
+# GPG signature verification (pure Rust)
+sequoia-openpgp = { version = "2", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Crypto
+sha2 = "0.11"
+hex = "0.4"
+
+# Filesystem
+tempfile = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+# Version parsing
+semver = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
