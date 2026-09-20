@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::time::Duration;
 use tracing::{info, error, warn};
+use tracing_subscriber::EnvFilter;
 
 mod manifest;
 mod gpg;
@@ -120,7 +121,17 @@ fn update_cycle(config: &Config) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let default_level = std::env::var("UPDATER_LOG_LEVEL")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .unwrap_or_else(|_| "info".into());
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default_level));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .init();
+
     let cli = Cli::parse();
     let config = Config::from_env();
     
