@@ -23,6 +23,14 @@ Secure auto-updater service for the Radegast Rustinel EDR sensor.
 | `UPDATER_AUTO_RESTART` | `true` | Whether to stop/start the service around binary replacement. |
 | `UPDATER_LOG_LEVEL` | `info` | Logging level (via `RUST_LOG`). |
 
+## CLI Options
+
+| Flag | Description |
+|------|-------------|
+| `--version`, `-V` | Print binary name and version, then exit. |
+| `--once`, `--check-now` | Run a single update check and exit instead of running daemon loop. |
+| `--help`, `-h` | Print help information. |
+
 ### Default Paths
 
 | Platform | Default `UPDATER_RUSTINEL_PATH` |

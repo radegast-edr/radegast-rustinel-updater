@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use sequoia_openpgp::{
-    parse::{Parse, stream::*},
+    parse::{stream::*, Parse},
     policy::StandardPolicy,
     Cert,
 };
@@ -9,8 +9,7 @@ const PUBLIC_KEY: &[u8] = include_bytes!("../pub.pgp.asc");
 
 pub fn verify_signature(data: &str, signature: &str) -> Result<()> {
     let policy = StandardPolicy::new();
-    let cert = Cert::from_bytes(PUBLIC_KEY)
-        .context("Failed to parse embedded GPG public key")?;
+    let cert = Cert::from_bytes(PUBLIC_KEY).context("Failed to parse embedded GPG public key")?;
     let helper = Helper { cert: &cert };
     let mut verifier = DetachedVerifierBuilder::from_bytes(signature.as_bytes())?
         .with_policy(&policy, None, helper)
@@ -24,7 +23,10 @@ struct Helper<'a> {
 }
 
 impl VerificationHelper for Helper<'_> {
-    fn get_certs(&mut self, _ids: &[sequoia_openpgp::KeyHandle]) -> sequoia_openpgp::Result<Vec<Cert>> {
+    fn get_certs(
+        &mut self,
+        _ids: &[sequoia_openpgp::KeyHandle],
+    ) -> sequoia_openpgp::Result<Vec<Cert>> {
         Ok(vec![self.cert.clone()])
     }
     fn check(&mut self, structure: MessageStructure) -> sequoia_openpgp::Result<()> {
@@ -35,7 +37,9 @@ impl VerificationHelper for Helper<'_> {
                 }
             }
         }
-        Err(anyhow::anyhow!("No valid GPG signature found from trusted key"))
+        Err(anyhow::anyhow!(
+            "No valid GPG signature found from trusted key"
+        ))
     }
 }
 
@@ -51,8 +55,21 @@ mod tests {
         assert!(verify_signature(hash_sha256, sign_gpg).is_ok());
 
         // Tampered data should fail
-        let tampered_data = "0000000000000000000000000000000000000000000000000000000000000000  linux-amd64.zip\n";
+        let tampered_data =
+            "0000000000000000000000000000000000000000000000000000000000000000  linux-amd64.zip\n";
         assert!(verify_signature(tampered_data, sign_gpg).is_err());
     }
-}
 
+    #[test]
+    fn test_verify_corrupted_signature() {
+        let hash_sha256 =
+            "859de61af40ea0b3f836af6d8eb801d5ed25e7582f2f7f47e0ffe3d2e149bdc7  linux-amd64.zip\n";
+        let invalid_sig =
+            "-----BEGIN PGP SIGNATURE-----\ncorrupted data\n-----END PGP SIGNATURE-----";
+        assert!(verify_signature(hash_sha256, invalid_sig).is_err());
+
+        assert!(verify_signature(hash_sha256, "not even pgp armor").is_err());
+        assert!(verify_signature(hash_sha256, "").is_err());
+        assert!(verify_signature("", invalid_sig).is_err());
+    }
+}

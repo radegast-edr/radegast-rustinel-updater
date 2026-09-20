@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use std::path::Path;
 
 const LAUNCHD_LABEL: &str = "io.rustinel.daemon";
@@ -8,7 +8,7 @@ const APP_BUNDLE_PATH: &str = "/Library/Radegast/rustinel/Rustinel.app";
 pub fn replace_app_bundle(archive_path: &Path) -> Result<()> {
     let staging = tempfile::tempdir_in("/Library/Radegast/rustinel")
         .context("Failed to create staging directory")?;
-    
+
     // Extract zip to staging
     let file = std::fs::File::open(archive_path)?;
     let mut zip = zip::ZipArchive::new(file)?;
@@ -33,34 +33,39 @@ pub fn replace_app_bundle(archive_path: &Path) -> Result<()> {
             }
         }
     }
-    
+
     let extracted_app = staging.path().join("Rustinel.app");
-    ensure!(extracted_app.exists(), "Extracted archive does not contain Rustinel.app");
-    
+    ensure!(
+        extracted_app.exists(),
+        "Extracted archive does not contain Rustinel.app"
+    );
+
     // Verify code signature of the extracted bundle
     let verify = std::process::Command::new("/usr/bin/codesign")
         .args(["--verify", "--deep", "--strict"])
         .arg(&extracted_app)
         .status()
         .context("Failed to run codesign verification")?;
-    ensure!(verify.success(), "Code signature verification failed on extracted bundle");
-    
+    ensure!(
+        verify.success(),
+        "Code signature verification failed on extracted bundle"
+    );
+
     let installed = Path::new(APP_BUNDLE_PATH);
-    
+
     // Backup current bundle
     let backup = staging.path().join("previous.app");
     if installed.exists() {
-        std::fs::rename(installed, &backup)
-            .context("Failed to move current bundle to backup")?;
+        std::fs::rename(installed, &backup).context("Failed to move current bundle to backup")?;
     }
-    
+
     // Use ditto for atomic replacement (preserves extended attributes)
     let ditto = std::process::Command::new("/usr/bin/ditto")
         .arg(&extracted_app)
         .arg(installed)
         .status()
         .context("Failed to copy new bundle via ditto")?;
-    
+
     if !ditto.success() {
         // Restore backup
         if backup.exists() {
@@ -68,7 +73,7 @@ pub fn replace_app_bundle(archive_path: &Path) -> Result<()> {
         }
         anyhow::bail!("ditto failed to install new app bundle");
     }
-    
+
     Ok(())
 }
 

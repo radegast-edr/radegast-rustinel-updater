@@ -1,0 +1,375 @@
+name: Release radegast-rustinel-updater
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (format: vNUM.NUM.NUM, e.g. v0.1.0)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run Tests & Lints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
+
+      - name: Setup Rust Toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.11.0
+        with:
+          components: clippy, rustfmt
+          cache: false
+
+      - name: Check Code Formatting
+        run: cargo fmt --check
+
+      - name: Run Unit Tests
+        run: cargo test --verbose
+
+      - name: Run Clippy Linter
+        run: cargo clippy -- -D warnings
+
+  check-version-and-tag:
+    name: Check Version & Tag
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
+        with:
+          token: ${{ secrets.RELEASE_TAG_TOKEN || secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Determine Tag & Check Version
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EVENT_NAME="${{ github.event_name }}"
+          REF_TYPE="${{ github.ref_type }}"
+          REF_NAME="${{ github.ref_name }}"
+          INPUT_TAG="${{ github.event.inputs.tag }}"
+
+          echo "Trigger details: event=$EVENT_NAME, ref_type=$REF_TYPE, ref_name=$REF_NAME, input_tag=$INPUT_TAG"
+
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+            echo "Using manual input tag: $TAG"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+            echo "Triggered by pushed tag: $TAG"
+          else
+            # Triggered on branch push (e.g. main)
+            VERSION=$(python3 -c '
+          import tomllib
+          with open("Cargo.toml", "rb") as f:
+              print(tomllib.load(f)["package"]["version"].strip())
+          ')
+            TAG="v${VERSION}"
+            echo "Extracted Cargo.toml version: ${VERSION} -> Tag: ${TAG}"
+
+            # Check if tag already exists on remote
+            if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+              echo "Tag ${TAG} already exists on remote origin. No new release needed."
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Tag ${TAG} does not exist on remote. Creating tag..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            git push origin "${TAG}"
+            echo "Successfully pushed tag ${TAG} to remote."
+          fi
+
+          # Validate tag format strictly matches vNUM.NUM.NUM
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '${TAG}' does not match expected format 'vNUM.NUM.NUM' (e.g. v0.1.0)"
+            exit 1
+          fi
+
+          # Check if a GitHub Release already exists for this tag
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "GitHub release for ${TAG} already exists. Skipping release build."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+  build-macos:
+    name: Build macOS Binaries
+    runs-on: macos-latest
+    needs: [test, check-version-and-tag]
+    if: needs.check-version-and-tag.outputs.should_release == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
+        with:
+          ref: ${{ needs.check-version-and-tag.outputs.tag }}
+
+      - name: Setup Rust Toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.11.0
+        with:
+          cache: false
+
+      - name: Add Rust macOS targets
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build macOS targets
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+
+      - name: Package macOS binaries
+        run: |
+          mkdir -p macos-dist
+
+          # Standalone executables
+          cp target/aarch64-apple-darwin/release/radegast-rustinel-updater macos-dist/radegast-rustinel-updater-aarch64-apple-darwin
+          cp target/x86_64-apple-darwin/release/radegast-rustinel-updater macos-dist/radegast-rustinel-updater-x86_64-apple-darwin
+          chmod +x macos-dist/*
+
+          # Tarball packages containing standard binary name
+          tar -czf macos-dist/radegast-rustinel-updater-aarch64-apple-darwin.tar.gz -C target/aarch64-apple-darwin/release radegast-rustinel-updater
+          tar -czf macos-dist/radegast-rustinel-updater-x86_64-apple-darwin.tar.gz -C target/x86_64-apple-darwin/release radegast-rustinel-updater
+
+          echo "macOS artifacts created:"
+          ls -lh macos-dist/
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: macos-binaries
+          path: macos-dist/
+          retention-days: 1
+
+  build-and-release:
+    name: Build Cross-Platform & Release
+    runs-on: ubuntu-latest
+    needs: [test, check-version-and-tag, build-macos]
+    if: needs.check-version-and-tag.outputs.should_release == 'true'
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
+        with:
+          ref: ${{ needs.check-version-and-tag.outputs.tag }}
+
+      - name: Setup Rust Toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.11.0
+        with:
+          cache: false
+
+      - name: Add Rust cross-compilation targets
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          rustup target add aarch64-unknown-linux-musl
+          rustup target add x86_64-pc-windows-gnu
+
+      - name: Install cross-compilers and tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu musl-tools zip
+
+      - name: Build Linux x86_64 (musl static)
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Build Linux arm64 (musl static cross)
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release --target aarch64-unknown-linux-musl
+
+      - name: Build Windows x86_64 (MinGW cross)
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: |
+          cargo build --release --target x86_64-pc-windows-gnu
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: macos-binaries
+          path: macos-dist/
+
+      - name: Assemble Release Assets
+        run: |
+          mkdir -p dist
+
+          # Linux x86_64
+          cp target/x86_64-unknown-linux-musl/release/radegast-rustinel-updater dist/radegast-rustinel-updater-x86_64-unknown-linux-musl
+          tar -czf dist/radegast-rustinel-updater-x86_64-unknown-linux-musl.tar.gz -C target/x86_64-unknown-linux-musl/release radegast-rustinel-updater
+
+          # Linux arm64
+          cp target/aarch64-unknown-linux-musl/release/radegast-rustinel-updater dist/radegast-rustinel-updater-aarch64-unknown-linux-musl
+          tar -czf dist/radegast-rustinel-updater-aarch64-unknown-linux-musl.tar.gz -C target/aarch64-unknown-linux-musl/release radegast-rustinel-updater
+
+          # Windows x86_64
+          cp target/x86_64-pc-windows-gnu/release/radegast-rustinel-updater.exe dist/radegast-rustinel-updater-x86_64-pc-windows-gnu.exe
+          (cd target/x86_64-pc-windows-gnu/release && zip -9 ../../../dist/radegast-rustinel-updater-x86_64-pc-windows-gnu.zip radegast-rustinel-updater.exe)
+
+          # macOS Apple Silicon & Intel
+          cp macos-dist/radegast-rustinel-updater-aarch64-apple-darwin dist/
+          cp macos-dist/radegast-rustinel-updater-x86_64-apple-darwin dist/
+          cp macos-dist/radegast-rustinel-updater-aarch64-apple-darwin.tar.gz dist/
+          cp macos-dist/radegast-rustinel-updater-x86_64-apple-darwin.tar.gz dist/
+
+          chmod +x dist/radegast-rustinel-updater-* || true
+
+          echo "Packaged artifacts in dist/:"
+          ls -lh dist/
+
+      - name: Generate SHA256 Checksums
+        run: |
+          cd dist
+          rm -f checksums-sha256.txt checksums-sha256.txt.asc
+          sha256sum * > checksums-sha256.txt
+          echo "SHA256 Checksums:"
+          cat checksums-sha256.txt
+
+      - name: Sign Checksums with PGP
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "::error::GPG_PRIVATE_KEY secret is required for signing release assets but is missing!"
+            exit 1
+          fi
+
+          echo "Signing checksums-sha256.txt with PGP..."
+          # Create an ephemeral, isolated GPG home directory
+          export GNUPGHOME=$(mktemp -d)
+          chmod 700 "$GNUPGHOME"
+
+          # Import GPG private key securely into ephemeral keyring
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+          # Create detached, ASCII-armored signature
+          gpg --batch --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+              --detach-sign --armor dist/checksums-sha256.txt
+
+          echo "Generated checksums-sha256.txt.asc signature:"
+          cat dist/checksums-sha256.txt.asc
+
+          # Verify the signature locally with embedded public key before publishing
+          echo "Verifying generated signature against pub.pgp.asc..."
+          gpg --batch --import pub.pgp.asc
+          gpg --batch --verify dist/checksums-sha256.txt.asc dist/checksums-sha256.txt
+          echo "PGP signature successfully verified against pub.pgp.asc!"
+
+          # Clean up ephemeral keyring
+          rm -rf "$GNUPGHOME"
+
+      - name: Generate build provenance attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: 'dist/*'
+
+      - name: Generate Release Description
+        env:
+          TAG: ${{ needs.check-version-and-tag.outputs.tag }}
+        run: |
+          python3 -c "
+          import os
+
+          tag = os.environ['TAG']
+          notes = f'''## Radegast Rustinel Updater {tag}
+
+          Automated multi-platform release of \`radegast-rustinel-updater\`, the secure auto-updater daemon for the [Radegast Rustinel EDR](https://github.com/radegast-edr/rustinel) endpoint sensor.
+
+          ### Packages & Binaries
+
+          | Platform | Architecture | Raw Binary | Archive (.tar.gz / .zip) |
+          |---|---|---|---|
+          | **Linux** | \`x86_64\` (musl static) | \`radegast-rustinel-updater-x86_64-unknown-linux-musl\` | \`radegast-rustinel-updater-x86_64-unknown-linux-musl.tar.gz\` |
+          | **Linux** | \`arm64\` (musl static) | \`radegast-rustinel-updater-aarch64-unknown-linux-musl\` | \`radegast-rustinel-updater-aarch64-unknown-linux-musl.tar.gz\` |
+          | **Windows** | \`x86_64\` (MinGW) | \`radegast-rustinel-updater-x86_64-pc-windows-gnu.exe\` | \`radegast-rustinel-updater-x86_64-pc-windows-gnu.zip\` |
+          | **macOS** | \`arm64\` (Apple Silicon) | \`radegast-rustinel-updater-aarch64-apple-darwin\` | \`radegast-rustinel-updater-aarch64-apple-darwin.tar.gz\` |
+          | **macOS** | \`x86_64\` (Intel) | \`radegast-rustinel-updater-x86_64-apple-darwin\` | \`radegast-rustinel-updater-x86_64-apple-darwin.tar.gz\` |
+
+          ---
+
+          ### Verification Instructions
+
+          Every release includes cryptographic SHA256 checksums, a detached PGP/GPG signature, and GitHub Build Provenance attestations.
+
+          #### 1. PGP Signature & Checksum Verification
+
+          Verify that the checksums file was signed by the official Radegast Release key, and that downloaded binaries match their authentic hashes:
+
+          \`\`\`bash
+          # 1. Download the checksums, detached signature, and public key
+          curl -sSL -O https://github.com/radegast-edr/radegast-rustinel-updater/releases/download/{tag}/checksums-sha256.txt
+          curl -sSL -O https://github.com/radegast-edr/radegast-rustinel-updater/releases/download/{tag}/checksums-sha256.txt.asc
+          curl -sSL -O https://raw.githubusercontent.com/radegast-edr/radegast-rustinel-updater/main/pub.pgp.asc
+
+          # 2. Import the Radegast public key
+          gpg --import pub.pgp.asc
+
+          # 3. Verify the detached PGP signature
+          gpg --verify checksums-sha256.txt.asc checksums-sha256.txt
+
+          # 4. Verify your downloaded asset matches the checksum
+          # On Linux:
+          sha256sum --check --ignore-missing checksums-sha256.txt
+
+          # On macOS:
+          shasum -a 256 --check --ignore-missing checksums-sha256.txt
+
+          # On Windows (PowerShell):
+          Get-FileHash <filename> -Algorithm SHA256
+          \`\`\`
+
+          #### 2. GitHub Build Provenance Attestation Verification
+
+          This release is cryptographically attested with GitHub artifact provenance backed by Sigstore. You can verify that all binaries were built inside GitHub Actions from the exact tagged commit in \`radegast-edr/radegast-rustinel-updater\`:
+
+          \`\`\`bash
+          # Requires GitHub CLI (https://cli.github.com/)
+          gh attestation verify <downloaded-file> --repo radegast-edr/radegast-rustinel-updater
+          \`\`\`
+
+          ---
+          '''
+
+          with open('/tmp/release-notes.md', 'w', encoding='utf-8') as f:
+              f.write(notes)
+          "
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.check-version-and-tag.outputs.tag }}"
+          echo "Publishing GitHub Release for ${TAG}..."
+          gh release create "${TAG}" dist/* \
+            --title "Radegast Rustinel Updater ${TAG}" \
+            --notes-file /tmp/release-notes.md \
+            --generate-notes

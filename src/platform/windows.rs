@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 
 const SERVICE_NAME: &str = "Rustinel";
 
@@ -11,7 +11,7 @@ pub fn stop_service() -> Result<()> {
     if !stop.success() {
         tracing::warn!("sc.exe stop returned non-zero (service may not be running)");
     }
-    
+
     // Wait for service to fully stop (important on Windows - binary is locked while running)
     tracing::info!("Waiting for service to stop...");
     for _ in 0..30 {
