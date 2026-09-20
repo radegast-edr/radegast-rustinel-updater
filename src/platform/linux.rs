@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 
-pub fn restart_service() -> Result<()> {
+pub fn stop_service() -> Result<()> {
     tracing::info!("Stopping rustinel service...");
     let stop = std::process::Command::new("/usr/bin/systemctl")
         .args(["stop", "rustinel"])
@@ -9,6 +9,10 @@ pub fn restart_service() -> Result<()> {
     if !stop.success() {
         tracing::warn!("systemctl stop rustinel returned non-zero (service may not be running)");
     }
+    Ok(())
+}
+
+pub fn start_service() -> Result<()> {
     tracing::info!("Starting rustinel service...");
     let start = std::process::Command::new("/usr/bin/systemctl")
         .args(["start", "rustinel"])

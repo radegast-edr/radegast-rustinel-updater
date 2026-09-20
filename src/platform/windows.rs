@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 
 const SERVICE_NAME: &str = "Rustinel";
 
-pub fn restart_service() -> Result<()> {
+pub fn stop_service() -> Result<()> {
     tracing::info!("Stopping Rustinel service...");
     let stop = std::process::Command::new("sc.exe")
         .args(["stop", SERVICE_NAME])
@@ -26,7 +26,10 @@ pub fn restart_service() -> Result<()> {
             }
         }
     }
-    
+    Ok(())
+}
+
+pub fn start_service() -> Result<()> {
     tracing::info!("Starting Rustinel service...");
     let start = std::process::Command::new("sc.exe")
         .args(["start", SERVICE_NAME])

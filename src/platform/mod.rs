@@ -35,22 +35,33 @@ pub fn current() -> Platform {
 
 pub fn default_rustinel_path() -> &'static str {
     #[cfg(target_os = "linux")]
-    { "/opt/rustinel/rustinel" }
+    { "/opt/radegast/rustinel/rustinel" }
     #[cfg(target_os = "macos")]
-    { "/Applications/Rustinel.app/Contents/MacOS/rustinel" }
+    { "/Library/Radegast/rustinel/rustinel" }
     #[cfg(windows)]
-    { r"C:\Program Files\Rustinel\rustinel.exe" }
+    { r"C:\Program Files\Radegast\rustinel\rustinel\rustinel.exe" }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     { "/usr/local/bin/rustinel" }
 }
 
-pub fn restart_rustinel() -> anyhow::Result<()> {
+pub fn stop_rustinel() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
-    return linux::restart_service();
+    return linux::stop_service();
     #[cfg(target_os = "macos")]
-    return macos::restart_service();
+    return macos::stop_service();
     #[cfg(windows)]
-    return windows::restart_service();
+    return windows::stop_service();
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    return Ok(());
+}
+
+pub fn start_rustinel() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    return linux::start_service();
+    #[cfg(target_os = "macos")]
+    return macos::start_service();
+    #[cfg(windows)]
+    return windows::start_service();
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     return Ok(());
 }

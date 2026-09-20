@@ -40,7 +40,7 @@ impl Config {
                 std::env::var("UPDATER_CHECK_INTERVAL")
                     .ok()
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(3600),
+                    .unwrap_or(86400),
             ),
             download_url: std::env::var("UPDATER_DOWNLOAD_URL")
                 .unwrap_or_else(|_| "https://console-api.radegast.app/api/v1".into()),
@@ -100,13 +100,20 @@ fn update_cycle(config: &Config) -> Result<()> {
     checksum::verify(&archive_path, &latest_entry.hash_sha256, &current_platform)?;
     info!("Checksum verified successfully.");
     
+    // Stop service BEFORE binary replacement to release file locks (critical on Windows)
+    if config.auto_restart {
+        info!("Stopping Rustinel service before binary replacement...");
+        platform::stop_rustinel()?;
+    }
+    
     info!("Installing new binary...");
     install::replace_binary(&archive_path, &config.rustinel_path)?;
     info!("Installation successful.");
     
+    // Start service AFTER binary replacement
     if config.auto_restart {
-        info!("Restarting service...");
-        platform::restart_rustinel()?;
+        info!("Starting Rustinel service...");
+        platform::start_rustinel()?;
     }
     
     Ok(())

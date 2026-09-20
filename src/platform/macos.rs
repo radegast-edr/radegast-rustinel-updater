@@ -1,13 +1,12 @@
 use anyhow::{Context, Result, ensure};
 use std::path::Path;
-use std::io::Read;
 
-const LAUNCHD_LABEL: &str = "com.rustinel.sensor";
-const APP_BUNDLE_PATH: &str = "/Applications/Rustinel.app";
+const LAUNCHD_LABEL: &str = "io.rustinel.daemon";
+const APP_BUNDLE_PATH: &str = "/Library/Radegast/rustinel/Rustinel.app";
 
 /// Replace the entire Rustinel.app bundle to preserve code signature.
 pub fn replace_app_bundle(archive_path: &Path) -> Result<()> {
-    let staging = tempfile::tempdir_in("/Applications")
+    let staging = tempfile::tempdir_in("/Library/Radegast/rustinel")
         .context("Failed to create staging directory")?;
     
     // Extract zip to staging
@@ -73,15 +72,17 @@ pub fn replace_app_bundle(archive_path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn restart_service() -> Result<()> {
+pub fn stop_service() -> Result<()> {
     tracing::info!("Stopping rustinel service...");
     let _ = std::process::Command::new("/bin/launchctl")
         .args(["stop", LAUNCHD_LABEL])
         .status();
-    
     // Give it a moment to stop
     std::thread::sleep(std::time::Duration::from_secs(2));
-    
+    Ok(())
+}
+
+pub fn start_service() -> Result<()> {
     tracing::info!("Starting rustinel service...");
     let start = std::process::Command::new("/bin/launchctl")
         .args(["start", LAUNCHD_LABEL])

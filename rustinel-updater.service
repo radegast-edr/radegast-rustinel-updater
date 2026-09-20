@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/radegast/rustinel-updater
+ExecStart=/opt/radegast/rustinel/rustinel-updater
 WorkingDirectory=/opt/radegast
 Restart=on-failure
 RestartSec=30s
@@ -30,7 +30,7 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service @network-io
-ReadWritePaths=/opt/rustinel
+ReadWritePaths=/opt/radegast/rustinel
 
 StandardOutput=journal
 StandardError=journal

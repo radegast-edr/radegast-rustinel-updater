@@ -8,17 +8,43 @@ Secure auto-updater service for the Radegast Rustinel EDR sensor.
 2. **Verify GPG**: Verifies the signature of the release entry with the embedded public key.
 3. **Download**: Fetches the binary for the detected platform.
 4. **Verify SHA256**: Ensures the downloaded archive matches the expected hash.
-5. **Replace**: Extracts and replaces the existing binary (or full `.app` bundle on macOS).
-6. **Restart**: Automatically restarts the Rustinel service depending on the platform.
+5. **Stop service**: Stops the Rustinel service before replacing the binary (critical on Windows where the .exe is locked while running).
+6. **Replace**: Extracts and replaces the existing binary (or full `.app` bundle on macOS).
+7. **Start service**: Starts the Rustinel service after successful replacement.
 
 ## Configuration (Environment Variables)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `UPDATER_MANIFEST_URL` | `https://radegast.app/api/rustinel-releases.json` | URL to fetch the release manifest from. |
-| `UPDATER_CHECK_INTERVAL` | `3600` | Interval in seconds to wait between checks. |
+| `UPDATER_CHECK_INTERVAL` | `86400` | Interval in seconds between update checks (default: 24 hours). |
 | `UPDATER_DOWNLOAD_URL` | `https://console-api.radegast.app/api/v1` | Base URL for binary downloads. |
 | `UPDATER_RUSTINEL_PATH` | Platform-dependent | Path to the Rustinel binary or application bundle. |
-| `UPDATER_AUTO_RESTART` | `true` | Whether to automatically restart the service after update. |
-| `UPDATER_LOG_LEVEL` | `info` | Logging level. |
+| `UPDATER_AUTO_RESTART` | `true` | Whether to stop/start the service around binary replacement. |
+| `UPDATER_LOG_LEVEL` | `info` | Logging level (via `RUST_LOG`). |
 
+### Default Paths
+
+| Platform | Default `UPDATER_RUSTINEL_PATH` |
+|----------|--------------------------------|
+| Linux | `/opt/radegast/rustinel/rustinel` |
+| macOS | `/Library/Radegast/rustinel/rustinel` |
+| Windows | `C:\Program Files\Radegast\rustinel\rustinel\rustinel.exe` |
+
+## Installation
+
+The updater binary is bundled inside `rustinel.zip` alongside the sensor binary. When deployed via the Radegast install scripts, a dedicated service is automatically created:
+
+- **Linux**: `rustinel-updater.service` (systemd)
+- **macOS**: `app.radegast.rustinel-updater.plist` (launchd)
+- **Windows**: `RadegastUpdater` (WinSW service)
+
+The service can be disabled during installation by passing `rustinel-autoupdate=false` to the install endpoint.
+
+## Security
+
+- GPG public key embedded at compile time (`pub.pgp.asc`)
+- Hardened systemd unit with `ProtectSystem=strict`, `NoNewPrivileges=true`, etc.
+- All downloads via HTTPS only (`reqwest` with `rustls`)
+- Binary replacement uses atomic rename (temp file in same directory)
+- macOS: code signature verification (`codesign --verify --deep --strict`) before bundle replacement
