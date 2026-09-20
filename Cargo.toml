@@ -1,6 +1,6 @@
 [package]
 name = "radegast-rustinel-updater"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Secure auto-updater service for Radegast Rustinel EDR sensor"
 license = "Apache-2.0"

@@ -48,11 +48,52 @@ pub fn replace_binary(archive_path: &Path, rustinel_path: &str) -> Result<()> {
             .set_permissions(std::fs::Permissions::from_mode(0o755))?;
     }
 
-    // Atomic rename
-    let tmp_path = tmp.into_temp_path();
-    tmp_path
-        .persist(target)
-        .context("Failed to replace rustinel binary")?;
+    // Atomic rename with retries and Windows fallback for locked files
+    let mut current_tmp = tmp.into_temp_path();
+    let mut last_err = None;
+
+    #[cfg(windows)]
+    let backup_path = std::path::PathBuf::from(format!("{}.old", target.display()));
+
+    for attempt in 1..=5 {
+        #[cfg(windows)]
+        {
+            if target.exists() {
+                let _ = std::fs::remove_file(&backup_path);
+                if let Err(e) = std::fs::rename(target, &backup_path) {
+                    tracing::warn!(
+                        "Attempt {attempt}/5: Failed to move existing binary to {}: {e}",
+                        backup_path.display()
+                    );
+                }
+            }
+        }
+
+        match current_tmp.persist(target) {
+            Ok(_) => {
+                #[cfg(windows)]
+                {
+                    let _ = std::fs::remove_file(&backup_path);
+                }
+                last_err = None;
+                break;
+            }
+            Err(persist_err) => {
+                tracing::warn!(
+                    "Attempt {attempt}/5: Failed to replace binary at {}: {}. Retrying...",
+                    target.display(),
+                    persist_err.error
+                );
+                last_err = Some(persist_err.error);
+                current_tmp = persist_err.path;
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }
+    }
+
+    if let Some(err) = last_err {
+        return Err(err).context("Failed to replace rustinel binary");
+    }
 
     // Clean up archive
     let _ = std::fs::remove_file(archive_path);

@@ -220,8 +220,11 @@ mod tests {
         assert!(Cli::try_parse_from(["radegast-rustinel-updater", "--nonexistent"]).is_err());
     }
 
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_config_from_env_defaults() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         std::env::remove_var("UPDATER_MANIFEST_URL");
         std::env::remove_var("UPDATER_CHECK_INTERVAL");
         std::env::remove_var("UPDATER_DOWNLOAD_URL");
@@ -241,6 +244,7 @@ mod tests {
 
     #[test]
     fn test_config_from_env_overrides() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         std::env::set_var(
             "UPDATER_MANIFEST_URL",
             "https://custom.example.com/releases.json",
