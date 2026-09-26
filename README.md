@@ -18,6 +18,7 @@ Secure auto-updater service for the Radegast Rustinel EDR sensor.
 |----------|---------|-------------|
 | `UPDATER_MANIFEST_URL` | `https://radegast.app/api/rustinel-releases.json` | URL to fetch the release manifest from. |
 | `UPDATER_CHECK_INTERVAL` | `86400` | Interval in seconds between update checks (default: 24 hours). |
+| `UPDATER_INITIAL_RETRY_INTERVAL` | `20` | Interval in seconds to re-try fetching the manifest on startup until first success (e.g. waiting for Wi-Fi). |
 | `UPDATER_DOWNLOAD_URL` | `https://console-api.radegast.app/api/v1` | Base URL for binary downloads. |
 | `UPDATER_RUSTINEL_PATH` | Platform-dependent | Path to the Rustinel binary or application bundle. |
 | `UPDATER_AUTO_RESTART` | `true` | Whether to stop/start the service around binary replacement. |

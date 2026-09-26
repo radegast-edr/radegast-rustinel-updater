@@ -31,6 +31,7 @@ struct Cli {
 struct Config {
     manifest_url: String,
     check_interval: Duration,
+    initial_retry_interval: Duration,
     download_url: String,
     rustinel_path: String,
     auto_restart: bool,
@@ -47,6 +48,12 @@ impl Config {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(86400),
             ),
+            initial_retry_interval: Duration::from_secs(
+                std::env::var("UPDATER_INITIAL_RETRY_INTERVAL")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(20),
+            ),
             download_url: std::env::var("UPDATER_DOWNLOAD_URL")
                 .unwrap_or_else(|_| "https://console-api.radegast.app/api/v1".into()),
             rustinel_path: std::env::var("UPDATER_RUSTINEL_PATH")
@@ -58,10 +65,7 @@ impl Config {
     }
 }
 
-fn update_cycle(config: &Config) -> Result<()> {
-    info!("Fetching manifest from {}", config.manifest_url);
-    let releases = manifest::fetch(&config.manifest_url)?;
-
+fn process_releases(config: &Config, releases: &[manifest::ReleaseEntry]) -> Result<()> {
     let current_version_res = version::current_installed(&config.rustinel_path);
     let current_version = match current_version_res {
         Ok(v) => {
@@ -78,7 +82,7 @@ fn update_cycle(config: &Config) -> Result<()> {
     };
 
     let current_platform = platform::current();
-    let latest = manifest::find_latest_for_platform(&releases, &current_platform);
+    let latest = manifest::find_latest_for_platform(releases, &current_platform);
 
     let (latest_version, latest_entry) = match latest {
         Some(v) => v,
@@ -131,6 +135,12 @@ fn update_cycle(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn update_cycle(config: &Config) -> Result<()> {
+    info!("Fetching manifest from {}", config.manifest_url);
+    let releases = manifest::fetch(&config.manifest_url)?;
+    process_releases(config, &releases)
+}
+
 fn main() -> Result<()> {
     let default_level = std::env::var("UPDATER_LOG_LEVEL")
         .or_else(|_| std::env::var("RUST_LOG"))
@@ -153,14 +163,20 @@ fn main() -> Result<()> {
     }
 
     info!(
-        "Starting auto-updater daemon (check interval: {}s / {:.1}h)...",
+        "Starting auto-updater daemon (check interval: {}s / {:.1}h, initial retry interval: {}s)...",
         config.check_interval.as_secs(),
-        config.check_interval.as_secs_f64() / 3600.0
+        config.check_interval.as_secs_f64() / 3600.0,
+        config.initial_retry_interval.as_secs()
     );
 
-    // 1. Run immediate update check during startup
+    // 1. Run initial update check during startup:
+    // Re-try getting the newest version manifest every initial_retry_interval (default 20s)
+    // until it succeeds for the first time (e.g. in case the computer was not connected to Wi-Fi during boot).
     info!("Running initial update check on startup...");
-    if let Err(e) = update_cycle(&config) {
+    let initial_releases =
+        manifest::fetch_until_success(&config.manifest_url, config.initial_retry_interval);
+
+    if let Err(e) = process_releases(&config, &initial_releases) {
         error!("Initial startup update check failed: {:?}", e);
     } else {
         info!("Initial startup update check completed successfully.");
@@ -227,6 +243,7 @@ mod tests {
         let _guard = ENV_MUTEX.lock().unwrap();
         std::env::remove_var("UPDATER_MANIFEST_URL");
         std::env::remove_var("UPDATER_CHECK_INTERVAL");
+        std::env::remove_var("UPDATER_INITIAL_RETRY_INTERVAL");
         std::env::remove_var("UPDATER_DOWNLOAD_URL");
         std::env::remove_var("UPDATER_RUSTINEL_PATH");
         std::env::remove_var("UPDATER_AUTO_RESTART");
@@ -237,6 +254,7 @@ mod tests {
             "https://radegast.app/api/rustinel-releases.json"
         );
         assert_eq!(cfg.check_interval, Duration::from_secs(86400));
+        assert_eq!(cfg.initial_retry_interval, Duration::from_secs(20));
         assert_eq!(cfg.download_url, "https://console-api.radegast.app/api/v1");
         assert!(cfg.auto_restart);
         assert!(!cfg.rustinel_path.is_empty());
@@ -250,6 +268,7 @@ mod tests {
             "https://custom.example.com/releases.json",
         );
         std::env::set_var("UPDATER_CHECK_INTERVAL", "3600");
+        std::env::set_var("UPDATER_INITIAL_RETRY_INTERVAL", "15");
         std::env::set_var("UPDATER_DOWNLOAD_URL", "https://download.example.com");
         std::env::set_var("UPDATER_RUSTINEL_PATH", "/custom/path/to/rustinel");
         std::env::set_var("UPDATER_AUTO_RESTART", "false");
@@ -257,6 +276,7 @@ mod tests {
         let cfg = Config::from_env();
         assert_eq!(cfg.manifest_url, "https://custom.example.com/releases.json");
         assert_eq!(cfg.check_interval, Duration::from_secs(3600));
+        assert_eq!(cfg.initial_retry_interval, Duration::from_secs(15));
         assert_eq!(cfg.download_url, "https://download.example.com");
         assert_eq!(cfg.rustinel_path, "/custom/path/to/rustinel");
         assert!(!cfg.auto_restart);
@@ -272,6 +292,7 @@ mod tests {
 
         std::env::remove_var("UPDATER_MANIFEST_URL");
         std::env::remove_var("UPDATER_CHECK_INTERVAL");
+        std::env::remove_var("UPDATER_INITIAL_RETRY_INTERVAL");
         std::env::remove_var("UPDATER_DOWNLOAD_URL");
         std::env::remove_var("UPDATER_RUSTINEL_PATH");
         std::env::remove_var("UPDATER_AUTO_RESTART");

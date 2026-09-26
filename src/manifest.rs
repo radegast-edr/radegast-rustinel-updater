@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::time::Duration;
+use tracing::{info, warn};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ReleaseEntry {
@@ -28,6 +29,48 @@ pub fn fetch(url: &str) -> Result<Vec<ReleaseEntry>> {
         .json()
         .context("Failed to parse release manifest")?;
     Ok(releases)
+}
+
+/// Repeatedly attempts to fetch the release manifest every `retry_interval` until it succeeds or reaches `max_retries`.
+/// Useful during initial boot when the network/Wi-Fi connection may not be established yet.
+pub fn fetch_with_retry_limit(
+    url: &str,
+    retry_interval: Duration,
+    max_retries: Option<usize>,
+) -> Result<Vec<ReleaseEntry>> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        info!("Fetching manifest from {} (attempt {})...", url, attempt);
+        match fetch(url) {
+            Ok(releases) => {
+                info!(
+                    "Successfully fetched release manifest on attempt {}.",
+                    attempt
+                );
+                return Ok(releases);
+            }
+            Err(e) => {
+                if let Some(max) = max_retries {
+                    if attempt >= max {
+                        return Err(e);
+                    }
+                }
+                warn!(
+                    "Failed to fetch release manifest (e.g. Wi-Fi not connected yet): {}. Retrying in {} seconds...",
+                    e,
+                    retry_interval.as_secs()
+                );
+                std::thread::sleep(retry_interval);
+            }
+        }
+    }
+}
+
+/// Repeatedly attempts to fetch the release manifest every `retry_interval` until it succeeds for the first time.
+pub fn fetch_until_success(url: &str, retry_interval: Duration) -> Vec<ReleaseEntry> {
+    fetch_with_retry_limit(url, retry_interval, None)
+        .expect("fetch_with_retry_limit without retry limit never returns Err")
 }
 
 pub fn find_latest_for_platform<'a>(
@@ -192,5 +235,69 @@ mod tests {
         let releases = fetch(&url).unwrap();
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].version, "1.7.1r1");
+    }
+
+    #[test]
+    fn test_fetch_until_success_retries_on_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            let mut count = 0;
+            while let Ok((mut stream, _)) = listener.accept() {
+                count += 1;
+                let mut req_buf = [0u8; 1024];
+                let _ = stream.read(&mut req_buf);
+
+                if count < 3 {
+                    // First 2 requests fail with 503 Service Unavailable
+                    let response = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                } else {
+                    // 3rd request succeeds
+                    let body = r#"[{"version":"1.8.0","hash_sha256":"h2 linux-amd64.zip\n","sign_gpg":"s2"}]"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                    break;
+                }
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{port}/manifest.json");
+        let releases = fetch_until_success(&url, Duration::from_millis(10));
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].version, "1.8.0");
+    }
+
+    #[test]
+    fn test_fetch_with_retry_limit_exceeded() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut req_buf = [0u8; 1024];
+                let _ = stream.read(&mut req_buf);
+                let response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{port}/manifest.json");
+        let res = fetch_with_retry_limit(&url, Duration::from_millis(10), Some(2));
+        assert!(res.is_err());
     }
 }
