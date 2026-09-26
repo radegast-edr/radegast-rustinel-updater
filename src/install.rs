@@ -15,7 +15,7 @@ pub fn replace_binary(archive_path: &Path, rustinel_path: &str) -> Result<()> {
         });
 
         if has_app_bundle {
-            return crate::platform::macos::replace_app_bundle(archive_path);
+            return crate::platform::macos::replace_app_bundle(archive_path, rustinel_path);
         }
     }
 
