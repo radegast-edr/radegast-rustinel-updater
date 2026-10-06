@@ -16,7 +16,8 @@ fn create_mock_rustinel(dir: &Path, version: &str) -> PathBuf {
     };
     let path = dir.join(file_name);
 
-    if cfg!(windows) {
+    #[cfg(windows)]
+    {
         let rust_src = format!(
             "fn main() {{ let args: Vec<String> = std::env::args().collect(); if args.len() > 1 && args[1] == \"--version\" {{ println!(\"rustinel {version}\"); }} else {{ println!(\"mock rustinel running\"); }} }}"
         );
@@ -32,7 +33,9 @@ fn create_mock_rustinel(dir: &Path, version: &str) -> PathBuf {
             let content = format!("@echo off\r\necho rustinel {version}\r\n");
             std::fs::write(&path, content).unwrap();
         }
-    } else {
+    }
+    #[cfg(not(windows))]
+    {
         use std::os::unix::fs::PermissionsExt;
         let content = format!("#!/bin/sh\necho \"rustinel {version}\"\n");
         std::fs::write(&path, content).unwrap();

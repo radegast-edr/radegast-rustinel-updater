@@ -23,6 +23,7 @@ Secure auto-updater service for the Radegast Rustinel EDR sensor.
 | `UPDATER_RUSTINEL_PATH` | Platform-dependent | Path to the Rustinel binary or application bundle. |
 | `UPDATER_AUTO_RESTART` | `true` | Whether to stop/start the service around binary replacement. |
 | `UPDATER_LOG_LEVEL` | `info` | Logging level (via `RUST_LOG`). |
+| `UPDATER_MIGRATION_TIMEOUT` | `300` | Maximum time in seconds to wait for a migration script to complete. |
 
 ## CLI Options
 
@@ -39,6 +40,23 @@ Secure auto-updater service for the Radegast Rustinel EDR sensor.
 | Linux | `/opt/radegast/rustinel/rustinel` |
 | macOS | `/Library/Radegast/rustinel/rustinel` |
 | Windows | `C:\Program Files\Radegast\rustinel\rustinel\rustinel.exe` |
+
+## Migration Scripts
+
+Release zip archives may optionally include a platform-specific migration script:
+
+| Platform | Script Name |
+|----------|-------------|
+| Linux / macOS | `migrate.sh` |
+| Windows | `migrate.bat` |
+
+If present, the migration script is executed **after** the Rustinel service is stopped but **before** the binary is replaced. This allows performing pre-update tasks such as configuration file migrations, directory restructuring, or cleanup.
+
+The script receives:
+- **Arguments**: `$1` / `%1` = current version (or `"none"`), `$2` / `%2` = new version
+- **Environment variables**: `RUSTINEL_CURRENT_VERSION`, `RUSTINEL_NEW_VERSION`
+
+If the migration script exits with a non-zero code, the update is **aborted** and the service is restarted with the original binary.
 
 ## Installation
 

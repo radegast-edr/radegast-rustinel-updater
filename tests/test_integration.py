@@ -272,6 +272,21 @@ def test_updater_integration():
             bad_server.shutdown()
             bad_server.server_close()
 
+    # 5. Test Mock Zip Migration Script Execution
+    print("\n--- Step 5: Testing Mock Zip Migration Script Execution & Binary Replacement ---")
+    res_mig = subprocess.run(
+        ["cargo", "test", "test_apply_update", "--", "--nocapture"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    print(res_mig.stdout)
+    if res_mig.stderr:
+        print(res_mig.stderr)
+    assert res_mig.returncode == 0, f"Mock zip migration tests failed with code {res_mig.returncode}"
+    print("  SUCCESS: Mock zip migration scripts executed and binary replaced successfully.")
+
     print("\nAll integration tests passed successfully!")
 
 

@@ -113,6 +113,7 @@ radegast-rustinel-updater/
 │   ├── checksum.rs              # SHA256 checksum parsing and file hash validation
 │   ├── download.rs              # HTTPS archive download into temporary storage
 │   ├── install.rs               # Atomic binary replacement, archive extraction, macOS codesign verify
+│   ├── migrate.rs               # Optional pre-update migration script detection and execution
 │   ├── version.rs               # RadegastVersion struct & ordering (e.g. 1.7.0 vs 1.7.0r1)
 │   └── platform/
 │       ├── mod.rs               # Platform struct, OS/Arch detection & archive naming

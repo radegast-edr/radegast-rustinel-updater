@@ -9,6 +9,7 @@ mod download;
 mod gpg;
 mod install;
 mod manifest;
+mod migrate;
 mod platform;
 mod version;
 
@@ -35,6 +36,7 @@ struct Config {
     download_url: String,
     rustinel_path: String,
     auto_restart: bool,
+    migration_timeout: Duration,
 }
 
 impl Config {
@@ -61,6 +63,12 @@ impl Config {
             auto_restart: std::env::var("UPDATER_AUTO_RESTART")
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
+            migration_timeout: Duration::from_secs(
+                std::env::var("UPDATER_MIGRATION_TIMEOUT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(300),
+            ),
         }
     }
 }
@@ -122,8 +130,23 @@ fn process_releases(config: &Config, releases: &[manifest::ReleaseEntry]) -> Res
         platform::stop_rustinel()?;
     }
 
-    info!("Installing new binary...");
-    install::replace_binary(&archive_path, &config.rustinel_path)?;
+    info!("Applying update from archive...");
+    let current_version_str = current_version.as_ref().map(|v| v.to_manifest_string());
+    if let Err(e) = install::apply_update(
+        &archive_path,
+        &config.rustinel_path,
+        current_version_str.as_deref(),
+        &latest_version.to_manifest_string(),
+        config.migration_timeout,
+    ) {
+        error!("Update application failed: {:?}", e);
+        // Restart service and abort update
+        if config.auto_restart {
+            warn!("Restarting Rustinel service after update failure...");
+            platform::start_rustinel()?;
+        }
+        return Err(e.context("Update aborted due to installation failure"));
+    }
     info!("Installation successful.");
 
     // Start service AFTER binary replacement
@@ -247,6 +270,7 @@ mod tests {
         std::env::remove_var("UPDATER_DOWNLOAD_URL");
         std::env::remove_var("UPDATER_RUSTINEL_PATH");
         std::env::remove_var("UPDATER_AUTO_RESTART");
+        std::env::remove_var("UPDATER_MIGRATION_TIMEOUT");
 
         let cfg = Config::from_env();
         assert_eq!(
@@ -258,6 +282,7 @@ mod tests {
         assert_eq!(cfg.download_url, "https://console-api.radegast.app/api/v1");
         assert!(cfg.auto_restart);
         assert!(!cfg.rustinel_path.is_empty());
+        assert_eq!(cfg.migration_timeout, Duration::from_secs(300));
     }
 
     #[test]
@@ -272,6 +297,7 @@ mod tests {
         std::env::set_var("UPDATER_DOWNLOAD_URL", "https://download.example.com");
         std::env::set_var("UPDATER_RUSTINEL_PATH", "/custom/path/to/rustinel");
         std::env::set_var("UPDATER_AUTO_RESTART", "false");
+        std::env::set_var("UPDATER_MIGRATION_TIMEOUT", "60");
 
         let cfg = Config::from_env();
         assert_eq!(cfg.manifest_url, "https://custom.example.com/releases.json");
@@ -280,6 +306,7 @@ mod tests {
         assert_eq!(cfg.download_url, "https://download.example.com");
         assert_eq!(cfg.rustinel_path, "/custom/path/to/rustinel");
         assert!(!cfg.auto_restart);
+        assert_eq!(cfg.migration_timeout, Duration::from_secs(60));
 
         std::env::set_var("UPDATER_AUTO_RESTART", "0");
         let cfg2 = Config::from_env();
@@ -296,5 +323,6 @@ mod tests {
         std::env::remove_var("UPDATER_DOWNLOAD_URL");
         std::env::remove_var("UPDATER_RUSTINEL_PATH");
         std::env::remove_var("UPDATER_AUTO_RESTART");
+        std::env::remove_var("UPDATER_MIGRATION_TIMEOUT");
     }
 }

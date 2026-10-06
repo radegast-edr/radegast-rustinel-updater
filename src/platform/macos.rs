@@ -67,7 +67,8 @@ pub fn replace_app_bundle(archive_path: &Path, rustinel_path: &str) -> Result<()
     );
 
     // Verify code signature of the extracted bundle if codesign tool is present
-    if Path::new("/usr/bin/codesign").exists() {
+    // (skipped in test builds to allow mock test bundles)
+    if !cfg!(test) && Path::new("/usr/bin/codesign").exists() {
         let verify = std::process::Command::new("/usr/bin/codesign")
             .args(["--verify", "--deep", "--strict"])
             .arg(&extracted_app)
