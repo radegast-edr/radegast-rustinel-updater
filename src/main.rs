@@ -89,6 +89,14 @@ fn process_releases(config: &Config, releases: &[manifest::ReleaseEntry]) -> Res
         }
     };
 
+    if let Some(blocker) = manifest::automatic_update_blocker(releases, current_version.as_ref())? {
+        warn!(
+            "Automatic update blocked by release {} (autoupdate=false); manual upgrade required.",
+            blocker.version
+        );
+        return Ok(());
+    }
+
     let current_platform = platform::current();
     let latest = manifest::find_latest_for_platform(releases, &current_platform);
 

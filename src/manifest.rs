@@ -9,6 +9,29 @@ pub struct ReleaseEntry {
     pub version: String,
     pub hash_sha256: String,
     pub sign_gpg: String,
+    #[serde(default = "default_autoupdate")]
+    pub autoupdate: bool,
+}
+
+fn default_autoupdate() -> bool {
+    true
+}
+
+/// Any release newer than the installed version can veto automatic updates,
+/// even if it has no archive for this platform or a later release allows updates.
+/// With an unknown installed version, a veto cannot safely be ruled out.
+pub fn automatic_update_blocker<'a>(
+    releases: &'a [ReleaseEntry],
+    current: Option<&crate::version::RadegastVersion>,
+) -> Result<Option<&'a ReleaseEntry>> {
+    for entry in releases.iter().filter(|entry| !entry.autoupdate) {
+        let version = crate::version::RadegastVersion::parse(&entry.version)
+            .context("Invalid version on release with autoupdate=false")?;
+        if current.is_none_or(|current| version > *current) {
+            return Ok(Some(entry));
+        }
+    }
+    Ok(None)
 }
 
 pub fn fetch(url: &str) -> Result<Vec<ReleaseEntry>> {
@@ -112,9 +135,109 @@ mod tests {
 
         let releases: Vec<ReleaseEntry> = serde_json::from_str(json_data).unwrap();
         assert_eq!(releases.len(), 1);
+        assert!(releases[0].autoupdate);
         assert_eq!(releases[0].version, "1.7.0r1");
         assert!(releases[0].hash_sha256.contains("linux-amd64.zip"));
         assert!(releases[0].sign_gpg.contains("BEGIN PGP SIGNATURE"));
+    }
+
+    fn release(version: &str, autoupdate: bool) -> ReleaseEntry {
+        ReleaseEntry {
+            version: version.into(),
+            hash_sha256: "hash  windows-amd64.zip\n".into(),
+            sign_gpg: "sig".into(),
+            autoupdate,
+        }
+    }
+
+    #[test]
+    fn test_deserialize_autoupdate_boolean() {
+        for allowed in [false, true] {
+            let data = serde_json::json!({
+                "version": "1.8.0",
+                "hash_sha256": "hash  linux-amd64.zip",
+                "sign_gpg": "sig",
+                "autoupdate": allowed,
+            });
+            let entry: ReleaseEntry = serde_json::from_value(data).unwrap();
+            assert_eq!(entry.autoupdate, allowed);
+        }
+        for invalid in [serde_json::json!("false"), serde_json::Value::Null] {
+            let data = serde_json::json!({
+                "version": "1.8.0", "hash_sha256": "hash", "sign_gpg": "sig",
+                "autoupdate": invalid,
+            });
+            assert!(serde_json::from_value::<ReleaseEntry>(data).is_err());
+        }
+    }
+
+    #[test]
+    fn test_intermediate_release_blocks_later_allowed_release() {
+        // Deliberately unsorted, mixing explicit true, omitted, and false.
+        // The veto has no Linux archive.
+        let mut releases: Vec<ReleaseEntry> = serde_json::from_str(r#"[
+            {"version":"1.9.0","hash_sha256":"hash  linux-amd64.zip", "sign_gpg":"sig", "autoupdate":true},
+            {"version":"1.7.0","hash_sha256":"hash  linux-amd64.zip", "sign_gpg":"sig"},
+            {"version":"v1.8.0r1","hash_sha256":"hash  windows-amd64.zip", "sign_gpg":"sig", "autoupdate":false}
+        ]"#).unwrap();
+        assert!(releases[0].autoupdate);
+        assert!(releases[1].autoupdate);
+        assert!(!releases[2].autoupdate);
+        let current = crate::version::RadegastVersion::parse("1.8.0").unwrap();
+        let blocker = automatic_update_blocker(&releases, Some(&current))
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocker.version, "v1.8.0r1");
+        releases.reverse();
+        assert!(automatic_update_blocker(&releases, Some(&current))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn test_omitted_and_true_autoupdate_allow_newer_releases() {
+        let releases: Vec<ReleaseEntry> = serde_json::from_str(r#"[
+            {"version":"1.8.0","hash_sha256":"hash  linux-amd64.zip", "sign_gpg":"sig"},
+            {"version":"1.9.0","hash_sha256":"hash  linux-amd64.zip", "sign_gpg":"sig", "autoupdate":true}
+        ]"#).unwrap();
+        let current = crate::version::RadegastVersion::parse("1.7.0").unwrap();
+        assert!(automatic_update_blocker(&releases, Some(&current))
+            .unwrap()
+            .is_none());
+        let linux = crate::platform::Platform {
+            os: "linux",
+            arch: "amd64",
+        };
+        let (latest, _) = find_latest_for_platform(&releases, &linux).unwrap();
+        assert_eq!(latest.to_manifest_string(), "1.9.0");
+    }
+
+    #[test]
+    fn test_blocker_at_or_below_current_allows_updates() {
+        let releases = vec![release("1.8.0r1", false), release("1.9.0", true)];
+        for version in ["1.8.0r1", "1.8.0r2", "1.9.0"] {
+            let current = crate::version::RadegastVersion::parse(version).unwrap();
+            assert!(automatic_update_blocker(&releases, Some(&current))
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn test_unknown_current_version_with_blocker_is_blocked() {
+        assert!(automatic_update_blocker(&[release("1.8.0", false)], None)
+            .unwrap()
+            .is_some());
+        assert!(automatic_update_blocker(&[release("1.8.0", true)], None)
+            .unwrap()
+            .is_none());
+        assert!(automatic_update_blocker(&[], None).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_invalid_blocker_version_aborts_update() {
+        let current = crate::version::RadegastVersion::parse("1.7.0").unwrap();
+        assert!(automatic_update_blocker(&[release("invalid", false)], Some(&current)).is_err());
     }
 
     #[test]
@@ -124,16 +247,19 @@ mod tests {
                 version: "1.7.0r1".into(),
                 hash_sha256: "hash1  linux-amd64.zip\nhash2  windows-amd64.zip\n".into(),
                 sign_gpg: "sig1".into(),
+                autoupdate: true,
             },
             ReleaseEntry {
                 version: "1.7.0".into(),
                 hash_sha256: "hash3  linux-amd64.zip\nhash4  mac-m5.zip\n".into(),
                 sign_gpg: "sig2".into(),
+                autoupdate: true,
             },
             ReleaseEntry {
                 version: "1.6.0".into(),
                 hash_sha256: "hash5  mac-m5.zip\n".into(),
                 sign_gpg: "sig3".into(),
+                autoupdate: true,
             },
         ];
 
@@ -175,6 +301,7 @@ mod tests {
             version: "1.7.0r1".into(),
             hash_sha256: "hash1  linux-amd64.zip\n".into(),
             sign_gpg: "sig1".into(),
+            autoupdate: true,
         }];
         let mac = crate::platform::Platform {
             os: "mac",
@@ -190,11 +317,13 @@ mod tests {
                 version: "invalid-semver".into(),
                 hash_sha256: "hash0  linux-amd64.zip\n".into(),
                 sign_gpg: "sig0".into(),
+                autoupdate: true,
             },
             ReleaseEntry {
                 version: "1.5.0".into(),
                 hash_sha256: "hash1  linux-amd64.zip\n".into(),
                 sign_gpg: "sig1".into(),
+                autoupdate: true,
             },
         ];
 

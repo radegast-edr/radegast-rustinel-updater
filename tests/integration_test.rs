@@ -54,7 +54,8 @@ fn get_version(binary: &Path) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn spawn_http_server(body: &'static str) -> (String, Arc<AtomicBool>) {
+fn spawn_http_server(body: impl Into<String>) -> (String, Arc<AtomicBool>) {
+    let body = body.into();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let running = Arc::new(AtomicBool::new(true));
@@ -176,4 +177,69 @@ fn test_updater_tampered_manifest_fails_and_preserves_binary() {
         "rustinel 1.3.0",
         "Binary must not be replaced"
     );
+}
+
+#[test]
+fn test_optional_autoupdate_controls_update_before_verification() {
+    // Allowed cases use an invalid signature to prove the updater proceeds
+    // past release policy without downloading or installing a binary.
+    let cases = [
+        (None, None, "1.7.0", false),
+        (Some(true), None, "1.7.0", false),
+        (Some(true), Some(false), "1.7.0", true),
+        (None, Some(false), "1.7.0", true),
+        (Some(false), None, "1.7.0", true),
+        (Some(true), Some(false), "1.8.0", false),
+        (None, Some(false), "1.8.0r1", false),
+    ];
+    for (latest_flag, intermediate_flag, current, blocked) in cases {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rustinel_path = create_mock_rustinel(temp_dir.path(), current);
+        let original_binary = std::fs::read(&rustinel_path).unwrap();
+        let mut latest = serde_json::json!({
+            "version": "1.9.0",
+            "hash_sha256": "hash  linux-amd64.zip\nhash  linux-arm64.zip\nhash  mac-amd64.zip\nhash  mac-m5.zip\nhash  windows-amd64.zip\n",
+            "sign_gpg": "invalid signature",
+        });
+        if let Some(flag) = latest_flag {
+            latest["autoupdate"] = flag.into();
+        }
+        let mut intermediate = serde_json::json!({
+            "version": "1.8.0", "hash_sha256": "", "sign_gpg": "invalid signature",
+        });
+        if let Some(flag) = intermediate_flag {
+            intermediate["autoupdate"] = flag.into();
+        }
+        let omitted = serde_json::json!({
+            "version": "1.6.0", "hash_sha256": "", "sign_gpg": "invalid signature",
+        });
+        let body = serde_json::json!([latest, omitted, intermediate]).to_string();
+        let (manifest_url, stop_server) = spawn_http_server(body);
+        let output = Command::new(env!("CARGO_BIN_EXE_radegast-rustinel-updater"))
+            .arg("--once")
+            .env("UPDATER_MANIFEST_URL", manifest_url)
+            .env("UPDATER_DOWNLOAD_URL", "http://127.0.0.1:1")
+            .env("UPDATER_RUSTINEL_PATH", &rustinel_path)
+            .env("UPDATER_AUTO_RESTART", "false")
+            .env("UPDATER_LOG_LEVEL", "info")
+            .env_remove("RUST_LOG")
+            .output()
+            .expect("Failed to execute updater");
+        stop_server.store(false, Ordering::Relaxed);
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.status.success(),
+            blocked,
+            "{latest_flag:?}, {intermediate_flag:?}, current={current}: {logs}"
+        );
+        assert_eq!(logs.contains("Automatic update blocked"), blocked, "{logs}");
+        assert_eq!(logs.contains("Verifying GPG signature"), !blocked, "{logs}");
+        assert!(!logs.contains("Downloading from"), "{logs}");
+        assert_eq!(std::fs::read(&rustinel_path).unwrap(), original_binary);
+        assert_eq!(get_version(&rustinel_path), format!("rustinel {current}"));
+    }
 }
