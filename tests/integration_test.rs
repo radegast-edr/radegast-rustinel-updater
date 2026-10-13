@@ -119,31 +119,34 @@ fn test_updater_end_to_end_flow() {
 
     let (manifest_url, stop_server) = spawn_http_server(MOCK_MANIFEST);
 
-    let status = Command::new(updater_bin)
+    // Exercise signature verification and download integrity locally. Never
+    // install a live release or stop host services as part of cargo test.
+    let (download_url, stop_download) = spawn_http_server("corrupt archive");
+    let output = Command::new(updater_bin)
         .arg("--once")
         .env("UPDATER_MANIFEST_URL", &manifest_url)
-        .env(
-            "UPDATER_DOWNLOAD_URL",
-            "https://console-api.radegast.app/api/v1",
-        )
-        .env("UPDATER_RUSTINEL_PATH", rustinel_path.to_str().unwrap())
+        .env("UPDATER_DOWNLOAD_URL", download_url)
+        .env("UPDATER_RUSTINEL_PATH", &rustinel_path)
         .env("UPDATER_AUTO_RESTART", "false")
         .env("UPDATER_LOG_LEVEL", "info")
-        .status()
+        .env_remove("RUST_LOG")
+        .output()
         .expect("Failed to execute updater binary");
-
     stop_server.store(false, Ordering::Relaxed);
-
-    assert!(
-        status.success(),
-        "Updater execution failed with status: {status:?}"
+    stop_download.store(false, Ordering::Relaxed);
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-
-    let updated_ver = get_version(&rustinel_path);
+    assert!(!output.status.success(), "{logs}");
     assert!(
-        updated_ver.contains("1.8.0"),
-        "Expected version 1.8.0 after update, got: {updated_ver}"
+        logs.contains("GPG signature verified successfully"),
+        "{logs}"
     );
+    assert!(logs.contains("SHA256 mismatch"), "{logs}");
+    assert!(!logs.contains("Stopping Rustinel"), "{logs}");
+    assert_eq!(get_version(&rustinel_path), "rustinel 1.3.0");
 }
 
 #[test]

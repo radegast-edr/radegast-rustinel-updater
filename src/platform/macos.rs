@@ -8,57 +8,20 @@ const LAUNCHD_LABEL: &str = "io.rustinel.daemon";
 pub fn replace_app_bundle(archive_path: &Path, rustinel_path: &str) -> Result<()> {
     let target = Path::new(rustinel_path);
     // Find the directory containing or destined to contain Rustinel.app
-    let bundle_dir = if target.to_string_lossy().contains("Rustinel.app") {
-        let mut cur = target;
-        while let Some(p) = cur.parent() {
-            if cur
-                .file_name()
-                .map(|n| n == "Rustinel.app")
-                .unwrap_or(false)
-            {
-                break;
-            }
-            cur = p;
-        }
-        cur.parent().unwrap_or(cur)
-    } else {
-        target
-            .parent()
-            .unwrap_or(Path::new("/Library/Radegast/rustinel"))
-    };
+    let bundle_dir = target
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == "Rustinel.app"))
+        .and_then(Path::parent)
+        .or_else(|| target.parent())
+        .context("Rustinel path has no parent directory")?;
     std::fs::create_dir_all(bundle_dir)?;
 
     let staging = tempfile::Builder::new()
         .prefix(".tmp_staging")
         .tempdir_in(bundle_dir)
-        .or_else(|_| tempfile::tempdir())
         .context("Failed to create staging directory")?;
 
-    // Extract zip to staging
-    let file = std::fs::File::open(archive_path)?;
-    let mut zip = zip::ZipArchive::new(file)?;
-    for i in 0..zip.len() {
-        let mut entry = zip.by_index(i)?;
-        let out_path = staging.path().join(entry.name());
-        if entry.is_dir() {
-            std::fs::create_dir_all(&out_path)?;
-        } else {
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut outfile = std::fs::File::create(&out_path)?;
-            std::io::copy(&mut entry, &mut outfile)?;
-            // Preserve executable permissions
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Some(mode) = entry.unix_mode() {
-                    let _ =
-                        std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
-                }
-            }
-        }
-    }
+    crate::install::extract_bundle(archive_path, staging.path())?;
 
     let extracted_app = staging.path().join("Rustinel.app");
     ensure!(
@@ -66,9 +29,9 @@ pub fn replace_app_bundle(archive_path: &Path, rustinel_path: &str) -> Result<()
         "Extracted archive does not contain Rustinel.app"
     );
 
-    // Verify code signature of the extracted bundle if codesign tool is present
+    // Require verification of the extracted bundle in production
     // (skipped in test builds to allow mock test bundles)
-    if !cfg!(test) && Path::new("/usr/bin/codesign").exists() {
+    if !cfg!(test) {
         let verify = std::process::Command::new("/usr/bin/codesign")
             .args(["--verify", "--deep", "--strict"])
             .arg(&extracted_app)
@@ -82,59 +45,61 @@ pub fn replace_app_bundle(archive_path: &Path, rustinel_path: &str) -> Result<()
 
     let installed = bundle_dir.join("Rustinel.app");
 
-    // Backup current bundle
-    let backup = staging.path().join("previous.app");
-    if installed.exists() {
-        let _ = std::fs::rename(&installed, &backup);
+    ensure!(
+        extracted_app.join("Contents/MacOS/rustinel").is_file(),
+        "Bundle is missing rustinel executable"
+    );
+    // Keep the backup outside the disposable staging directory so failed
+    // rollback cannot delete the last working installation.
+    let backup = bundle_dir.join("Rustinel.app.old");
+    ensure!(
+        !backup.exists(),
+        "Previous backup exists at {}; recover it before updating",
+        backup.display()
+    );
+    let had_previous = installed.exists();
+    if had_previous {
+        std::fs::rename(&installed, &backup).context("Failed to back up installed bundle")?;
+    }
+    if let Err(error) = std::fs::rename(&extracted_app, &installed) {
+        if had_previous {
+            std::fs::rename(&backup, &installed).with_context(|| {
+                format!(
+                    "Bundle replacement failed ({error}); backup retained at {}",
+                    backup.display()
+                )
+            })?;
+        }
+        return Err(error).context("Failed to install new bundle");
     }
 
-    // Use ditto for atomic replacement (preserves extended attributes)
-    let ditto_success = if Path::new("/usr/bin/ditto").exists() {
-        std::process::Command::new("/usr/bin/ditto")
-            .arg(&extracted_app)
-            .arg(&installed)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    } else {
-        false
-    };
-
-    if !ditto_success {
-        // Fallback to rename
-        if let Err(e) = std::fs::rename(&extracted_app, &installed) {
-            if backup.exists() {
-                let _ = std::fs::rename(&backup, &installed);
+    // Stage the launcher before replacing it, preserving the old launcher on failure.
+    let app_bin = installed.join("Contents/MacOS/rustinel");
+    if target != app_bin {
+        let launcher = staging.path().join("launcher");
+        let result = (|| -> Result<()> {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(std::fs::canonicalize(&app_bin)?, &launcher)?;
+            #[cfg(not(unix))]
+            std::fs::copy(&app_bin, &launcher)?;
+            std::fs::rename(&launcher, target).context("Failed to install bundle launcher")?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            std::fs::rename(&installed, &extracted_app).context(
+                "Failed to remove new bundle during rollback; previous bundle retained in backup",
+            )?;
+            if had_previous {
+                std::fs::rename(&backup, &installed)
+                    .context("Failed to restore previous bundle; retained in backup")?;
             }
-            anyhow::bail!(
-                "Failed to copy new app bundle to {}: {e}",
-                installed.display()
-            );
+            return Err(error);
         }
     }
 
-    // Ensure rustinel_path points to the app binary inside the installed bundle
-    let app_bin = installed.join("Contents/MacOS/rustinel");
-    if app_bin.exists() && target != app_bin {
-        let _ = std::fs::remove_file(target);
-        let symlink_created = {
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(&app_bin, target).is_ok()
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        };
-        if !symlink_created {
-            std::fs::copy(&app_bin, target)
-                .context("Failed to copy app binary to rustinel path")?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755));
-            }
+    if had_previous {
+        if let Err(error) = std::fs::remove_dir_all(&backup) {
+            tracing::warn!("Updated bundle installed, but backup cleanup failed: {error}");
         }
     }
 
@@ -146,12 +111,29 @@ pub fn replace_app_bundle(archive_path: &Path, rustinel_path: &str) -> Result<()
 
 pub fn stop_service() -> Result<()> {
     tracing::info!("Stopping rustinel service...");
-    let _ = std::process::Command::new("/bin/launchctl")
+    let status = std::process::Command::new("/bin/launchctl")
         .args(["stop", LAUNCHD_LABEL])
-        .status();
-    // Give it a moment to stop
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    Ok(())
+        .status()
+        .context("Failed to stop rustinel via launchctl")?;
+    ensure!(status.success(), "launchctl stop failed");
+    for _ in 0..60 {
+        let output = std::process::Command::new("/bin/launchctl")
+            .arg("list")
+            .output()?;
+        ensure!(output.status.success(), "Failed to query launchd services");
+        if service_has_stopped(&String::from_utf8_lossy(&output.stdout)) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    anyhow::bail!("Timed out waiting for Rustinel to stop")
+}
+
+pub(crate) fn service_has_stopped(output: &str) -> bool {
+    output.lines().any(|line| {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        fields.len() == 3 && fields[2] == LAUNCHD_LABEL && fields[0] == "-"
+    })
 }
 
 pub fn start_service() -> Result<()> {
@@ -162,4 +144,41 @@ pub fn start_service() -> Result<()> {
         .context("Failed to start rustinel via launchctl")?;
     ensure!(start.success(), "launchctl start failed");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn stopped_state_requires_exact_label_and_no_pid() {
+        assert!(service_has_stopped("-\t0\tio.rustinel.daemon"));
+        assert!(!service_has_stopped("123\t0\tio.rustinel.daemon"));
+        assert!(!service_has_stopped("-\t0\tio.rustinel.daemon.other"));
+        assert!(!service_has_stopped(""));
+    }
+
+    #[test]
+    fn launcher_failure_restores_previous_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("Rustinel.app");
+        std::fs::create_dir(&installed).unwrap();
+        std::fs::write(installed.join("old-marker"), b"old").unwrap();
+        let target = dir.path().join("launcher");
+        // A directory cannot be overwritten by the staged launcher.
+        std::fs::create_dir(&target).unwrap();
+        let archive = dir.path().join("bundle.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file(
+            "Rustinel.app/Contents/MacOS/rustinel",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"new").unwrap();
+        zip.finish().unwrap();
+        assert!(replace_app_bundle(&archive, target.to_str().unwrap()).is_err());
+        assert_eq!(std::fs::read(installed.join("old-marker")).unwrap(), b"old");
+        assert!(target.is_dir());
+    }
 }

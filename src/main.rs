@@ -7,6 +7,7 @@ use tracing_subscriber::EnvFilter;
 mod checksum;
 mod download;
 mod gpg;
+mod http;
 mod install;
 mod manifest;
 mod migrate;
@@ -48,12 +49,14 @@ impl Config {
                 std::env::var("UPDATER_CHECK_INTERVAL")
                     .ok()
                     .and_then(|s| s.parse().ok())
+                    .filter(|seconds| *seconds > 0)
                     .unwrap_or(86400),
             ),
             initial_retry_interval: Duration::from_secs(
                 std::env::var("UPDATER_INITIAL_RETRY_INTERVAL")
                     .ok()
                     .and_then(|s| s.parse().ok())
+                    .filter(|seconds| *seconds > 0)
                     .unwrap_or(20),
             ),
             download_url: std::env::var("UPDATER_DOWNLOAD_URL")
@@ -67,6 +70,7 @@ impl Config {
                 std::env::var("UPDATER_MIGRATION_TIMEOUT")
                     .ok()
                     .and_then(|s| s.parse().ok())
+                    .filter(|seconds| *seconds > 0)
                     .unwrap_or(300),
             ),
         }
@@ -81,6 +85,11 @@ fn process_releases(config: &Config, releases: &[manifest::ReleaseEntry]) -> Res
             Some(v)
         }
         Err(e) => {
+            if std::fs::symlink_metadata(&config.rustinel_path).is_ok() {
+                return Err(
+                    e.context("Cannot determine installed version; refusing a possible downgrade")
+                );
+            }
             warn!(
                 "Failed to get current version (perhaps not installed): {}",
                 e
@@ -133,10 +142,8 @@ fn process_releases(config: &Config, releases: &[manifest::ReleaseEntry]) -> Res
     info!("Checksum verified successfully.");
 
     // Stop service BEFORE binary replacement to release file locks (critical on Windows)
-    if config.auto_restart {
-        info!("Stopping Rustinel service before binary replacement...");
-        platform::stop_rustinel()?;
-    }
+    info!("Stopping Rustinel service before binary replacement...");
+    platform::stop_rustinel()?;
 
     info!("Applying update from archive...");
     let current_version_str = current_version.as_ref().map(|v| v.to_manifest_string());
@@ -151,7 +158,11 @@ fn process_releases(config: &Config, releases: &[manifest::ReleaseEntry]) -> Res
         // Restart service and abort update
         if config.auto_restart {
             warn!("Restarting Rustinel service after update failure...");
-            platform::start_rustinel()?;
+            if let Err(restart_error) = platform::start_rustinel() {
+                return Err(e.context(format!(
+                    "Installation failed and service restart also failed: {restart_error:#}"
+                )));
+            }
         }
         return Err(e.context("Update aborted due to installation failure"));
     }
@@ -324,6 +335,14 @@ mod tests {
         assert!(Config::from_env().auto_restart);
         std::env::set_var("UPDATER_AUTO_RESTART", "1");
         assert!(Config::from_env().auto_restart);
+
+        std::env::set_var("UPDATER_CHECK_INTERVAL", "0");
+        std::env::set_var("UPDATER_INITIAL_RETRY_INTERVAL", "0");
+        std::env::set_var("UPDATER_MIGRATION_TIMEOUT", "0");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.check_interval, Duration::from_secs(86400));
+        assert_eq!(cfg.initial_retry_interval, Duration::from_secs(20));
+        assert_eq!(cfg.migration_timeout, Duration::from_secs(300));
 
         std::env::remove_var("UPDATER_MANIFEST_URL");
         std::env::remove_var("UPDATER_CHECK_INTERVAL");

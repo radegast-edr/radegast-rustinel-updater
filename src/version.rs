@@ -90,6 +90,11 @@ pub fn current_installed(rustinel_path: &str) -> Result<RadegastVersion> {
         .arg("--version")
         .output()
         .context("Failed to execute rustinel --version")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "rustinel --version failed with {}",
+        output.status
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_version_output(&stdout)
 }
@@ -97,6 +102,17 @@ pub fn current_installed(rustinel_path: &str) -> Result<RadegastVersion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_version_command_is_not_accepted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("rustinel");
+        std::fs::write(&binary, b"#!/bin/sh\necho 'rustinel 1.2.3'\nexit 1\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(current_installed(binary.to_str().unwrap()).is_err());
+    }
 
     #[test]
     fn version_ordering() {

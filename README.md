@@ -21,7 +21,7 @@ Secure auto-updater service for the Radegast Rustinel EDR sensor.
 | `UPDATER_INITIAL_RETRY_INTERVAL` | `20` | Interval in seconds to re-try fetching the manifest on startup until first success (e.g. waiting for Wi-Fi). |
 | `UPDATER_DOWNLOAD_URL` | `https://console-api.radegast.app/api/v1` | Base URL for binary downloads. |
 | `UPDATER_RUSTINEL_PATH` | Platform-dependent | Path to the Rustinel binary or application bundle. |
-| `UPDATER_AUTO_RESTART` | `true` | Whether to stop/start the service around binary replacement. |
+| `UPDATER_AUTO_RESTART` | `true` | Whether to start the service after replacement (including recovery after failure). The service is always stopped before replacement; a stop failure aborts the update. |
 | `UPDATER_LOG_LEVEL` | `info` | Logging level (via `RUST_LOG`). |
 | `UPDATER_MIGRATION_TIMEOUT` | `300` | Maximum time in seconds to wait for a migration script to complete. |
 
@@ -72,6 +72,6 @@ The service can be disabled during installation by passing `rustinel-autoupdate=
 
 - GPG public key embedded at compile time (`pub.pgp.asc`)
 - Hardened systemd unit with `ProtectSystem=strict`, `NoNewPrivileges=true`, etc.
-- All downloads via HTTPS only (`reqwest` with `rustls`)
+- All downloads require HTTPS (HTTP is allowed only for loopback hosts; redirects cannot downgrade HTTPS) (`reqwest` with `rustls`)
 - Binary replacement uses atomic rename (temp file in same directory)
 - macOS: code signature verification (`codesign --verify --deep --strict`) before bundle replacement

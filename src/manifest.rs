@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -35,22 +34,11 @@ pub fn automatic_update_blocker<'a>(
 }
 
 pub fn fetch(url: &str) -> Result<Vec<ReleaseEntry>> {
-    let is_localhost = url.contains("127.0.0.1") || url.contains("localhost");
-    let client = Client::builder()
-        .user_agent(concat!(
-            "radegast-rustinel-updater/",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .https_only(!is_localhost && !cfg!(test))
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(60))
-        .build()?;
-    let releases: Vec<ReleaseEntry> = client
-        .get(url)
-        .send()?
-        .error_for_status()?
-        .json()
-        .context("Failed to parse release manifest")?;
+    let client = crate::http::client(url, Duration::from_secs(60))?;
+    let response = client.get(url).send()?.error_for_status()?;
+    let mut bytes = Vec::new();
+    crate::http::copy_limited(response, &mut bytes, 8 * 1024 * 1024)?;
+    let releases = serde_json::from_slice(&bytes).context("Failed to parse release manifest")?;
     Ok(releases)
 }
 
@@ -108,7 +96,7 @@ pub fn find_latest_for_platform<'a>(
             let has_platform = entry
                 .hash_sha256
                 .lines()
-                .any(|line| line.trim().ends_with(&archive_name));
+                .any(|line| line.split_whitespace().nth(1) == Some(archive_name.as_str()));
             if !has_platform {
                 return None;
             }

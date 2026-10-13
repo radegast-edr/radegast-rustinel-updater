@@ -4,7 +4,7 @@ version = "0.4.0"
 edition = "2021"
 description = "Secure auto-updater service for Radegast Rustinel EDR sensor"
 license = "Apache-2.0"
-rust-version = "1.82"
+rust-version = "1.88"
 
 [dependencies]
 # HTTP client with pure-Rust TLS
@@ -35,6 +35,9 @@ anyhow = "1"
 
 # Version parsing
 semver = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

@@ -34,7 +34,7 @@ pub fn replace_binary(archive_path: &Path, rustinel_path: &str) -> Result<()> {
         let mut zip = zip::ZipArchive::new(file)?;
         let has_app_bundle = (0..zip.len()).any(|i| {
             zip.by_index(i)
-                .map(|e| e.name().starts_with("Rustinel.app"))
+                .map(|e| e.name().starts_with("Rustinel.app/"))
                 .unwrap_or(false)
         });
 
@@ -64,6 +64,7 @@ pub fn replace_binary(archive_path: &Path, rustinel_path: &str) -> Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     std::io::copy(&mut entry, &mut tmp)?;
     tmp.flush()?;
+    tmp.as_file().sync_all()?;
 
     #[cfg(unix)]
     {
@@ -79,20 +80,17 @@ pub fn replace_binary(archive_path: &Path, rustinel_path: &str) -> Result<()> {
     #[cfg(windows)]
     let backup_path = std::path::PathBuf::from(format!("{}.old", target.display()));
 
-    for attempt in 1..=5 {
-        #[cfg(windows)]
-        {
-            if target.exists() {
-                let _ = std::fs::remove_file(&backup_path);
-                if let Err(e) = std::fs::rename(target, &backup_path) {
-                    tracing::warn!(
-                        "Attempt {attempt}/5: Failed to move existing binary to {}: {e}",
-                        backup_path.display()
-                    );
-                }
-            }
-        }
+    #[cfg(windows)]
+    if target.exists() {
+        anyhow::ensure!(
+            !backup_path.exists(),
+            "Previous binary backup exists at {}; recover it before updating",
+            backup_path.display()
+        );
+        std::fs::rename(target, &backup_path).context("Failed to back up existing binary")?;
+    }
 
+    for attempt in 1..=5 {
         match current_tmp.persist(target) {
             Ok(_) => {
                 #[cfg(windows)]
@@ -116,6 +114,15 @@ pub fn replace_binary(archive_path: &Path, rustinel_path: &str) -> Result<()> {
     }
 
     if let Some(err) = last_err {
+        #[cfg(windows)]
+        if backup_path.exists() {
+            std::fs::rename(&backup_path, target).with_context(|| {
+                format!(
+                    "Replacement failed ({err}); failed to restore backup at {}",
+                    backup_path.display()
+                )
+            })?;
+        }
         return Err(err).context("Failed to replace rustinel binary");
     }
 
@@ -125,10 +132,105 @@ pub fn replace_binary(archive_path: &Path, rustinel_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Extract only regular files and directories, contained within a private staging directory.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn extract_bundle(archive_path: &Path, staging: &Path) -> Result<()> {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(archive_path)?)?;
+    let mut remaining = 2 * 1024 * 1024 * 1024u64;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i)?;
+        let relative = entry
+            .enclosed_name()
+            .context("Unsafe path in release archive")?;
+        let out_path = staging.join(relative);
+        let mode = entry.unix_mode().unwrap_or(0);
+        let kind = mode & 0o170000;
+        anyhow::ensure!(
+            kind == 0 || kind == 0o100000 || kind == 0o040000,
+            "Unsupported special file in release archive"
+        );
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut outfile = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&out_path)?;
+            anyhow::ensure!(
+                entry.size() <= remaining,
+                "Extracted archive exceeds size limit"
+            );
+            let size = entry.size();
+            crate::http::copy_limited(&mut entry, &mut outfile, size)?;
+            remaining -= size;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // Never install setuid/setgid or world-writable files.
+                let permissions = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
+                outfile.set_permissions(std::fs::Permissions::from_mode(permissions))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn bundle_extraction_rejects_traversal_and_symlinks() {
+        for name in ["../escaped", "/absolute/escaped"] {
+            let dir = tempfile::tempdir().unwrap();
+            let archive = dir.path().join("archive.zip");
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+            zip.start_file(name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(b"payload").unwrap();
+            zip.finish().unwrap();
+            let staging = tempfile::tempdir_in(dir.path()).unwrap();
+            assert!(extract_bundle(&archive, staging.path()).is_err());
+            assert!(!dir.path().join("escaped").exists());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("symlink.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.add_symlink("link", "../outside", SimpleFileOptions::default())
+            .unwrap();
+        zip.finish().unwrap();
+        let staging = tempfile::tempdir_in(dir.path()).unwrap();
+        assert!(extract_bundle(&archive, staging.path()).is_err());
+    }
+
+    #[test]
+    fn bundle_extraction_preserves_contents_and_safe_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("bundle.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file(
+            "Rustinel.app/Contents/MacOS/rustinel",
+            SimpleFileOptions::default().unix_permissions(0o7777),
+        )
+        .unwrap();
+        zip.write_all(b"payload").unwrap();
+        zip.finish().unwrap();
+        let staging = tempfile::tempdir_in(dir.path()).unwrap();
+        extract_bundle(&archive, staging.path()).unwrap();
+        let binary = staging.path().join("Rustinel.app/Contents/MacOS/rustinel");
+        assert_eq!(std::fs::read(&binary).unwrap(), b"payload");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(binary).unwrap().permissions().mode() & 0o7777,
+                0o755
+            );
+        }
+    }
 
     #[test]
     fn test_replace_binary_success() {

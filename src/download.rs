@@ -1,24 +1,13 @@
 use anyhow::{Context, Result};
-use reqwest::blocking::Client;
 use std::io::Write;
-use std::path::PathBuf;
 use std::time::Duration;
 
 pub fn fetch_binary(
     download_url: &str,
     version_str: &str,
     platform: &crate::platform::Platform,
-) -> Result<PathBuf> {
-    let is_localhost = download_url.contains("127.0.0.1") || download_url.contains("localhost");
-    let client = Client::builder()
-        .user_agent(concat!(
-            "radegast-rustinel-updater/",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .https_only(!is_localhost && !cfg!(test))
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(600))
-        .build()?;
+) -> Result<tempfile::TempPath> {
+    let client = crate::http::client(download_url, Duration::from_secs(600))?;
     let url = format!(
         "{}/public/releases/{}/{}/{}/download",
         download_url.trim_end_matches('/'),
@@ -33,11 +22,10 @@ pub fn fetch_binary(
         .error_for_status()
         .context("Failed to download rustinel binary")?;
     let mut tmp = tempfile::NamedTempFile::new()?;
-    let bytes = response.bytes()?;
-    tmp.write_all(&bytes)?;
+    // Stream untrusted data to disk, with a 1 GiB ceiling.
+    crate::http::copy_limited(response, &mut tmp, 1024 * 1024 * 1024)?;
     tmp.flush()?;
-    let path = tmp.into_temp_path().keep()?;
-    Ok(path)
+    Ok(tmp.into_temp_path())
 }
 
 #[cfg(test)]
@@ -78,7 +66,9 @@ mod tests {
         let content = std::fs::read(&downloaded_path).unwrap();
         assert_eq!(content, b"fake-binary-zip-stream");
 
-        let _ = std::fs::remove_file(downloaded_path);
+        let path = downloaded_path.to_path_buf();
+        drop(downloaded_path);
+        assert!(!path.exists(), "Downloaded archive must be removed on drop");
     }
 
     #[test]

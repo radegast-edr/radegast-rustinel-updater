@@ -26,12 +26,10 @@ pub fn run_if_present(
     let mut zip = zip::ZipArchive::new(file)?;
 
     // Check if migration script exists in archive
-    if zip.by_name(script_name).is_err() {
-        tracing::info!(
-            "No migration script ({}) found in archive, skipping.",
-            script_name
-        );
-        return Ok(false);
+    match zip.by_name(script_name) {
+        Ok(_) => {}
+        Err(zip::result::ZipError::FileNotFound) => return Ok(false),
+        Err(error) => return Err(error).context("Failed to read migration script"),
     }
 
     // Extract to a temporary directory
@@ -76,10 +74,15 @@ pub fn run_if_present(
     cmd.env("RUSTINEL_CURRENT_VERSION", current_str);
     cmd.env("RUSTINEL_NEW_VERSION", new_version);
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     let mut child = cmd.spawn().context("Failed to start migration script")?;
 
-    // Wait with timeout using a separate thread
-    let timeout_ms = timeout.as_millis() as u64;
+    // Poll without truncating large timeout durations.
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
@@ -91,9 +94,8 @@ pub fn run_if_present(
                 return Ok(true);
             }
             Ok(None) => {
-                if start.elapsed().as_millis() as u64 >= timeout_ms {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                if start.elapsed() >= timeout {
+                    terminate_migration(&mut child);
                     anyhow::bail!(
                         "Migration script timed out after {} seconds",
                         timeout.as_secs()
@@ -102,10 +104,30 @@ pub fn run_if_present(
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
+                terminate_migration(&mut child);
                 return Err(e).context("Failed to wait for migration script");
             }
         }
     }
+}
+
+fn terminate_migration(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: the child was spawned in its own process group with its PID
+        // as group ID. A negative PID targets that group, including descendants.
+        unsafe {
+            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill.exe")
+            .args(["/F", "/T", "/PID", &child.id().to_string()])
+            .output();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(test)]
@@ -113,6 +135,32 @@ mod tests {
     use super::*;
     use std::io::Write;
     use zip::write::SimpleFileOptions;
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_descendants_before_they_can_modify_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("migration.zip");
+        let marker = dir.path().join("late-write");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        zip.start_file("migrate.sh", SimpleFileOptions::default())
+            .unwrap();
+        write!(
+            zip,
+            "(sleep 1; echo unsafe > '{}') &\nwait\n",
+            marker.display()
+        )
+        .unwrap();
+        zip.finish().unwrap();
+        let error = run_if_present(&archive, Some("1.0.0"), "2.0.0", Duration::from_millis(100))
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(
+            !marker.exists(),
+            "Migration descendant survived the timeout"
+        );
+    }
 
     #[test]
     fn test_no_migration_script_returns_false() {

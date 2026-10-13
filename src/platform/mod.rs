@@ -1,8 +1,10 @@
 #[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub mod macos;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub mod windows;
 
 pub struct Platform {
@@ -138,8 +140,12 @@ mod tests {
 
     #[test]
     fn test_stop_and_start_service_does_not_panic() {
-        // Calling stop/start should safely execute or return a graceful result/warning
-        let _ = stop_rustinel();
-        let _ = start_rustinel();
+        // Never stop the real endpoint sensor as a side effect of cargo test.
+        #[cfg(target_os = "linux")]
+        linux::test_service_commands();
+        #[cfg(windows)]
+        assert!(!windows::parse_sc_query_is_stopped("Access is denied."));
+        #[cfg(target_os = "macos")]
+        assert!(!macos::service_has_stopped("123\t0\tio.rustinel.daemon"));
     }
 }

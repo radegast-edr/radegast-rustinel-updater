@@ -135,11 +135,11 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          EVENT_NAME="${{ github.event_name }}"
-          REF_TYPE="${{ github.ref_type }}"
-          REF_NAME="${{ github.ref_name }}"
-          INPUT_TAG="${{ github.event.inputs.tag }}"
 
           echo "Trigger details: event=$EVENT_NAME, ref_type=$REF_TYPE, ref_name=$REF_NAME, input_tag=$INPUT_TAG"
 
@@ -340,6 +340,9 @@ jobs:
           # Create an ephemeral, isolated GPG home directory
           export GNUPGHOME=$(mktemp -d)
           chmod 700 "$GNUPGHOME"
+          VERIFY_HOME=$(mktemp -d)
+          chmod 700 "$VERIFY_HOME"
+          trap 'rm -rf "$GNUPGHOME" "$VERIFY_HOME"' EXIT
 
           # Import GPG private key securely into ephemeral keyring
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
@@ -353,8 +356,8 @@ jobs:
 
           # Verify the signature locally with embedded public key before publishing
           echo "Verifying generated signature against pub.pgp.asc..."
-          gpg --batch --import pub.pgp.asc
-          gpg --batch --verify dist/checksums-sha256.txt.asc dist/checksums-sha256.txt
+          gpg --homedir "$VERIFY_HOME" --batch --import pub.pgp.asc
+          gpg --homedir "$VERIFY_HOME" --batch --no-auto-key-retrieve --verify dist/checksums-sha256.txt.asc dist/checksums-sha256.txt
           echo "PGP signature successfully verified against pub.pgp.asc!"
 
           # Clean up ephemeral keyring
