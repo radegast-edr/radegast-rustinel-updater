@@ -23,7 +23,7 @@ hex = "0.4"
 
 # Filesystem
 tempfile = "3"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
 
 # Logging
 tracing = "0.1"
