@@ -1,6 +1,7 @@
 use anyhow::{ensure, Context, Result};
 use std::path::Path;
 
+#[cfg(test)]
 const LAUNCHD_LABEL: &str = "io.rustinel.daemon";
 
 /// Replace the entire Rustinel.app bundle to preserve code signature,
@@ -111,24 +112,56 @@ pub fn replace_app_bundle(archive_path: &Path, rustinel_path: &str) -> Result<()
 
 pub fn stop_service() -> Result<()> {
     tracing::info!("Stopping rustinel service...");
+    let before = std::process::Command::new("/bin/launchctl")
+        .args(["print", "system/io.rustinel.daemon"])
+        .output()
+        .context("Failed to inspect Rustinel launchd job")?;
+    ensure!(
+        before.status.success(),
+        "Cannot inspect Rustinel launchd job"
+    );
+    let pid = service_pid(&String::from_utf8_lossy(&before.stdout))?;
+    // The installer sets KeepAlive=true. `stop` alone permits launchd to
+    // immediately restart the old executable during replacement.
     let status = std::process::Command::new("/bin/launchctl")
-        .args(["stop", LAUNCHD_LABEL])
+        .args(["bootout", "system/io.rustinel.daemon"])
         .status()
-        .context("Failed to stop rustinel via launchctl")?;
-    ensure!(status.success(), "launchctl stop failed");
-    for _ in 0..60 {
-        let output = std::process::Command::new("/bin/launchctl")
-            .arg("list")
-            .output()?;
-        ensure!(output.status.success(), "Failed to query launchd services");
-        if service_has_stopped(&String::from_utf8_lossy(&output.stdout)) {
-            return Ok(());
+        .context("Failed to unload Rustinel launchd job")?;
+    ensure!(status.success(), "launchctl bootout failed");
+    if let Some(pid) = pid {
+        for _ in 0..60 {
+            let alive = std::process::Command::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .context("Failed to check whether Rustinel exited")?;
+            if !alive.status.success() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        anyhow::bail!("Timed out waiting for Rustinel PID {pid} to exit");
     }
-    anyhow::bail!("Timed out waiting for Rustinel to stop")
+    Ok(())
 }
 
+fn service_pid(output: &str) -> Result<Option<u32>> {
+    for line in output.lines() {
+        if let Some((field, value)) = line.trim().split_once('=') {
+            if field.trim() == "pid" {
+                let pid = value.trim().parse::<u32>().context("Invalid launchd PID")?;
+                ensure!(pid > 0, "Invalid zero launchd PID");
+                return Ok(Some(pid));
+            }
+        }
+    }
+    ensure!(
+        !output.lines().any(|line| line.trim() == "state = running"),
+        "Running launchd job has no PID"
+    );
+    Ok(None)
+}
+
+#[cfg(test)]
 pub(crate) fn service_has_stopped(output: &str) -> bool {
     output.lines().any(|line| {
         let fields: Vec<_> = line.split_whitespace().collect();
@@ -139,10 +172,14 @@ pub(crate) fn service_has_stopped(output: &str) -> bool {
 pub fn start_service() -> Result<()> {
     tracing::info!("Starting rustinel service...");
     let start = std::process::Command::new("/bin/launchctl")
-        .args(["start", LAUNCHD_LABEL])
+        .args([
+            "bootstrap",
+            "system",
+            "/Library/LaunchDaemons/io.rustinel.daemon.plist",
+        ])
         .status()
         .context("Failed to start rustinel via launchctl")?;
-    ensure!(start.success(), "launchctl start failed");
+    ensure!(start.success(), "launchctl bootstrap failed");
     Ok(())
 }
 
@@ -150,6 +187,18 @@ pub fn start_service() -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn launchd_pid_must_identify_the_running_process() {
+        assert_eq!(
+            service_pid("state = running\n pid = 123").unwrap(),
+            Some(123)
+        );
+        assert_eq!(service_pid("state = not running").unwrap(), None);
+        assert!(service_pid("state = running").is_err());
+        assert!(service_pid("pid = 0").is_err());
+        assert!(service_pid("pid = bad").is_err());
+    }
 
     #[test]
     fn stopped_state_requires_exact_label_and_no_pid() {

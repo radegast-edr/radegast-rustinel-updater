@@ -117,10 +117,90 @@ jobs:
       - name: Run Integration Tests
         run: python3 tests/test_integration.py
 
+  real-update:
+    name: Real signed upgrade (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [test]
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout updater under test
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Checkout canonical backend integration harness
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: radegast-edr/radegast-backend
+          ref: 49d9a3ebf08e01ffde995d432da592abc3ff1d91
+          path: backend
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
+        with:
+          cache: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+
+      - name: Build production updater and fixture verifier
+        run: cargo build --locked --release --bin radegast-rustinel-updater --example verify_release
+
+      - name: Check test orchestration
+        run: python -m unittest discover -s tests/real_update -p 'test_*.py' -v
+
+      - name: Install backend dependencies
+        run: uv sync --frozen --project backend
+
+      - name: Prepare signed fixtures and run native upgrade
+        shell: python
+        run: |
+          import os
+          import pathlib
+          import shutil
+          import subprocess
+          import sys
+          root = pathlib.Path.cwd()
+          suffix = '.exe' if os.name == 'nt' else ''
+          common = [
+              '--updater', str(root / 'target/release' / ('radegast-rustinel-updater' + suffix)),
+              '--verifier', str(root / 'target/release/examples' / ('verify_release' + suffix)),
+              '--backend-dir', str(root / 'backend'),
+          ]
+          script = str(root / 'tests/real_update/run.py')
+          subprocess.run([sys.executable, script, 'prepare', *common], check=True)
+          command = [shutil.which('uv'), 'run', '--frozen', '--project', str(root / 'backend'),
+                     'python', script, 'run', '--disposable-host', *common]
+          if os.name != 'nt':
+              command = ['sudo', 'env', 'PATH=' + os.environ['PATH'], 'GITHUB_ACTIONS=true', *command]
+          subprocess.run(command, check=True)
+
+      - name: Make diagnostics readable
+        if: always() && runner.os != 'Windows'
+        run: sudo chmod -R a+rX target/real-update-output || true
+
+      - name: Upload native upgrade diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: real-update-${{ matrix.os }}
+          path: |
+            target/real-update-output/
+            target/real-update-assets/*.json
+          retention-days: 7
+          if-no-files-found: warn
+
   check-version-and-tag:
     name: Check Version & Tag
     runs-on: ubuntu-latest
-    needs: [test, integration-linux, integration-windows, integration-mac]
+    needs: [test, integration-linux, integration-windows, integration-mac, real-update]
     if: github.event_name != 'pull_request'
     permissions:
       contents: write
