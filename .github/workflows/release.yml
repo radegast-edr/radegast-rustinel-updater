@@ -180,11 +180,36 @@ jobs:
                      'python', script, 'run', '--disposable-host', *common]
           if os.name != 'nt':
               command = ['sudo', 'env', 'PATH=' + os.environ['PATH'], 'GITHUB_ACTIONS=true', *command]
-          subprocess.run(command, check=True)
+          try:
+              subprocess.run(command, check=True)
+          except Exception:
+              output_dir = root / 'target/real-update-output'
+              if output_dir.exists():
+                  for log_file in sorted(output_dir.glob('*.*')):
+                      print(f'=== {log_file.name} ===', flush=True)
+                      try:
+                          print(log_file.read_text(encoding='utf-8', errors='replace'), flush=True)
+                      except Exception as err:
+                          print(f'Failed to read {log_file}: {err}', flush=True)
+              raise
 
       - name: Make diagnostics readable
         if: always() && runner.os != 'Windows'
         run: sudo chmod -R a+rX target/real-update-output || true
+
+      - name: Dump diagnostic logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          if [ -d target/real-update-output ]; then
+            for f in target/real-update-output/*; do
+              if [ -f "$f" ]; then
+                echo "==================== $f ===================="
+                cat "$f"
+                echo ""
+              fi
+            done
+          fi
 
       - name: Upload native upgrade diagnostics
         if: always()

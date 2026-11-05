@@ -74,7 +74,7 @@ def select_pair(entries, os_name, arch, baseline_version=None, candidate_version
             updatable = [
                 e
                 for e in updatable
-                if e["version"] not in ("1.8.0", "1.7.0", "1.6.0")
+                if e["version"] not in ("1.8.0", "1.7.0")
             ]
 
         # 1. Prefer pairs with zero global blockers in the entire manifest.
@@ -292,9 +292,16 @@ def serve(directory):
 
 
 def checked(command):
-    return subprocess.run(
-        command, capture_output=True, text=True, check=True, timeout=60
-    ).stdout
+    res = subprocess.run(
+        command, capture_output=True, text=True, timeout=60
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"Command {command} failed with exit code {res.returncode}:\n"
+            f"STDOUT: {res.stdout.strip()}\n"
+            f"STDERR: {res.stderr.strip()}"
+        )
+    return res.stdout
 
 
 def sensor_pid(os_name):
@@ -342,17 +349,28 @@ def agent_control(os_name, start):
             time.sleep(1)
         raise RuntimeError(f"Agent did not reach {desired}")
     else:
+        plist = "/Library/LaunchDaemons/app.radegast.agent.plist"
         if start:
-            checked(
+            res = subprocess.run(
                 [
                     "launchctl",
                     "bootstrap",
                     "system",
-                    "/Library/LaunchDaemons/app.radegast.agent.plist",
-                ]
+                    plist,
+                ],
+                capture_output=True,
+                text=True,
             )
+            if res.returncode != 0:
+                checked(["launchctl", "load", "-w", plist])
         else:
-            checked(["launchctl", "bootout", "system/app.radegast.agent"])
+            res = subprocess.run(
+                ["launchctl", "bootout", "system/app.radegast.agent"],
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode != 0:
+                checked(["launchctl", "unload", "-w", plist])
 
 
 def verify_installed(path, release):
@@ -604,7 +622,7 @@ def run(args):
         (args.output / "update-result.json").write_text(
             json.dumps(result, indent=2), encoding="utf-8"
         )
-    print(json.dumps(result, indent=2))
+    print(json.dumps(result, indent=2), flush=True)
     return 0 if result["status"] == "PASS" else 1
 
 

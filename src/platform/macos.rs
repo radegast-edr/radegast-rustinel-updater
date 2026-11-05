@@ -36,11 +36,12 @@ pub fn replace_app_bundle(archive_path: &Path, rustinel_path: &str) -> Result<()
         let verify = std::process::Command::new("/usr/bin/codesign")
             .args(["--verify", "--deep", "--strict"])
             .arg(&extracted_app)
-            .status()
+            .output()
             .context("Failed to run codesign verification")?;
         ensure!(
-            verify.success(),
-            "Code signature verification failed on extracted bundle"
+            verify.status.success(),
+            "Code signature verification failed on extracted bundle: {}",
+            String::from_utf8_lossy(&verify.stderr).trim()
         );
     }
 
@@ -118,16 +119,34 @@ pub fn stop_service() -> Result<()> {
         .context("Failed to inspect Rustinel launchd job")?;
     ensure!(
         before.status.success(),
-        "Cannot inspect Rustinel launchd job"
+        "Cannot inspect Rustinel launchd job: {}",
+        String::from_utf8_lossy(&before.stderr).trim()
     );
     let pid = service_pid(&String::from_utf8_lossy(&before.stdout))?;
     // The installer sets KeepAlive=true. `stop` alone permits launchd to
     // immediately restart the old executable during replacement.
     let status = std::process::Command::new("/bin/launchctl")
         .args(["bootout", "system/io.rustinel.daemon"])
-        .status()
+        .output()
         .context("Failed to unload Rustinel launchd job")?;
-    ensure!(status.success(), "launchctl bootout failed");
+    if !status.status.success() {
+        tracing::warn!(
+            "launchctl bootout failed ({}); attempting launchctl unload fallback",
+            String::from_utf8_lossy(&status.stderr).trim()
+        );
+        let fallback = std::process::Command::new("/bin/launchctl")
+            .args([
+                "unload",
+                "-w",
+                "/Library/LaunchDaemons/io.rustinel.daemon.plist",
+            ])
+            .status()
+            .context("Failed to unload Rustinel launchd job via fallback")?;
+        ensure!(
+            fallback.success(),
+            "Both launchctl bootout and unload failed"
+        );
+    }
     if let Some(pid) = pid {
         for _ in 0..60 {
             let alive = std::process::Command::new("/bin/kill")
@@ -177,9 +196,26 @@ pub fn start_service() -> Result<()> {
             "system",
             "/Library/LaunchDaemons/io.rustinel.daemon.plist",
         ])
-        .status()
+        .output()
         .context("Failed to start rustinel via launchctl")?;
-    ensure!(start.success(), "launchctl bootstrap failed");
+    if !start.status.success() {
+        tracing::warn!(
+            "launchctl bootstrap failed ({}); attempting launchctl load fallback",
+            String::from_utf8_lossy(&start.stderr).trim()
+        );
+        let fallback = std::process::Command::new("/bin/launchctl")
+            .args([
+                "load",
+                "-w",
+                "/Library/LaunchDaemons/io.rustinel.daemon.plist",
+            ])
+            .status()
+            .context("Failed to start rustinel via fallback")?;
+        ensure!(
+            fallback.success(),
+            "Both launchctl bootstrap and load failed"
+        );
+    }
     Ok(())
 }
 
