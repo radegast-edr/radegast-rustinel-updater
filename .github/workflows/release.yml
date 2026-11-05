@@ -45,6 +45,7 @@ jobs:
   integration-linux:
     name: Run Linux Integration Tests
     runs-on: ubuntu-latest
+    needs: [test]
     timeout-minutes: 15
     steps:
       - name: Checkout repository
@@ -69,6 +70,7 @@ jobs:
   integration-windows:
     name: Run Windows Integration Tests
     runs-on: windows-latest
+    needs: [test]
     timeout-minutes: 15
     steps:
       - name: Checkout repository
@@ -93,6 +95,7 @@ jobs:
   integration-mac:
     name: Run macOS Integration Tests
     runs-on: macos-latest
+    needs: [test]
     timeout-minutes: 15
     steps:
       - name: Checkout repository

@@ -34,7 +34,10 @@ pub fn replace_binary(archive_path: &Path, rustinel_path: &str) -> Result<()> {
         let mut zip = zip::ZipArchive::new(file)?;
         let has_app_bundle = (0..zip.len()).any(|i| {
             zip.by_index(i)
-                .map(|e| e.name().starts_with("Rustinel.app/"))
+                .map(|e| match e.name() {
+                    Ok(name) => name.starts_with("Rustinel.app/"),
+                    Err(_) => false,
+                })
                 .unwrap_or(false)
         });
 
@@ -139,6 +142,11 @@ pub(crate) fn extract_bundle(archive_path: &Path, staging: &Path) -> Result<()> 
     let mut remaining = 2 * 1024 * 1024 * 1024u64;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i)?;
+        let raw_name = entry.name()?;
+        anyhow::ensure!(
+            !raw_name.starts_with('/') && !raw_name.starts_with('\\') && !raw_name.contains(':'),
+            "Unsafe path in release archive"
+        );
         let relative = entry
             .enclosed_name()
             .context("Unsafe path in release archive")?;
