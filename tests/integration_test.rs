@@ -47,11 +47,18 @@ fn create_mock_rustinel(dir: &Path, version: &str) -> PathBuf {
 }
 
 fn get_version(binary: &Path) -> String {
-    let output = Command::new(binary)
-        .arg("--version")
-        .output()
-        .expect("Failed to execute mock rustinel");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+    let mut last_err = None;
+    for _ in 0..10 {
+        match Command::new(binary).arg("--version").output() {
+            Ok(output) => return String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            Err(e) if e.raw_os_error() == Some(26) => {
+                thread::sleep(std::time::Duration::from_millis(50));
+                last_err = Some(e);
+            }
+            Err(e) => panic!("Failed to execute mock rustinel: {e}"),
+        }
+    }
+    panic!("Failed to execute mock rustinel: {}", last_err.unwrap());
 }
 
 fn spawn_http_server(body: impl Into<String>) -> (String, Arc<AtomicBool>) {

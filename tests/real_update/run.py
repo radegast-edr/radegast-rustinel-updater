@@ -350,27 +350,95 @@ def agent_control(os_name, start):
         raise RuntimeError(f"Agent did not reach {desired}")
     else:
         plist = "/Library/LaunchDaemons/app.radegast.agent.plist"
+        label = "app.radegast.agent"
         if start:
-            res = subprocess.run(
-                [
-                    "launchctl",
-                    "bootstrap",
-                    "system",
-                    plist,
-                ],
+            log_dir = Path("/Library/Logs/Radegast")
+            if log_dir.exists():
+                subprocess.run(
+                    ["chmod", "2750", str(log_dir)],
+                    check=False,
+                    capture_output=True,
+                )
+                alerts_file = log_dir / "alerts.json"
+                if alerts_file.exists():
+                    subprocess.run(
+                        ["chmod", "640", str(alerts_file)],
+                        check=False,
+                        capture_output=True,
+                    )
+
+            subprocess.run(
+                ["chown", "root:wheel", plist],
+                check=False,
                 capture_output=True,
-                text=True,
             )
-            if res.returncode != 0:
-                checked(["launchctl", "load", "-w", plist])
+            subprocess.run(
+                ["chmod", "644", plist],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["launchctl", "enable", f"system/{label}"],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["launchctl", "load", "-w", plist],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["launchctl", "bootstrap", "system", plist],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["launchctl", "kickstart", "-k", f"system/{label}"],
+                check=False,
+                capture_output=True,
+            )
+
+            for _ in range(30):
+                res = subprocess.run(
+                    ["launchctl", "print", f"system/{label}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res.returncode == 0 and re.search(r"state\s*=\s*running", res.stdout):
+                    return
+                time.sleep(1)
+                subprocess.run(
+                    ["launchctl", "kickstart", "-k", f"system/{label}"],
+                    check=False,
+                    capture_output=True,
+                )
         else:
-            res = subprocess.run(
-                ["launchctl", "bootout", "system/app.radegast.agent"],
+            subprocess.run(
+                ["launchctl", "bootout", f"system/{label}"],
+                check=False,
                 capture_output=True,
-                text=True,
             )
-            if res.returncode != 0:
-                checked(["launchctl", "unload", "-w", plist])
+            subprocess.run(
+                ["launchctl", "bootout", "system", plist],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["launchctl", "unload", plist],
+                check=False,
+                capture_output=True,
+            )
+            for _ in range(30):
+                res = subprocess.run(
+                    ["launchctl", "print", f"system/{label}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res.returncode != 0 or not re.search(r"state\s*=\s*running", res.stdout):
+                    return
+                time.sleep(1)
 
 
 def verify_installed(path, release):
