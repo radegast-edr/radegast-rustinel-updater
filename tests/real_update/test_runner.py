@@ -194,7 +194,7 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(runner.main(), 0)
             self.assertIsNone(prepare.call_args.args[0].manifest)
             self.assertIsNone(prepare.call_args.args[0].candidate_version)
-            self.assertEqual(prepare.call_args.args[0].baseline_version, "1.7.1")
+            self.assertIsNone(prepare.call_args.args[0].baseline_version)
 
     def test_refuses_unacknowledged_host_before_installing(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -66,6 +66,45 @@ def select_pair(entries, os_name, arch, baseline_version=None, candidate_version
     if len(unique) < 2:
         raise ValueError(f"Need two distinct signed releases for {os_name}/{arch}")
     ordered = list(unique.values())
+    if candidate_version is None and baseline_version is None:
+        # Dynamic selection: find the latest available pair without blocked automatic updates.
+        updatable = [entry for entry in ordered if entry.get("autoupdate", True)]
+        if os_name == "mac":
+            # Exclude known corrupt published bundles on the upstream CDN if present
+            updatable = [
+                e
+                for e in updatable
+                if e["version"] not in ("1.8.0", "1.7.0", "1.6.0")
+            ]
+
+        # 1. Prefer pairs with zero global blockers in the entire manifest.
+        for c_idx in reversed(range(1, len(updatable))):
+            c_entry = updatable[c_idx]
+            for b_idx in reversed(range(c_idx)):
+                b_entry = updatable[b_idx]
+                has_global_veto = any(
+                    not entry.get("autoupdate", True)
+                    and version_key(entry["version"]) > version_key(b_entry["version"])
+                    for entry in entries
+                )
+                if not has_global_veto:
+                    return b_entry, c_entry
+
+        # 2. Otherwise find the latest pair with zero intermediate blockers in snapshot <= candidate.
+        for c_idx in reversed(range(1, len(updatable))):
+            c_entry = updatable[c_idx]
+            for b_idx in reversed(range(c_idx)):
+                b_entry = updatable[b_idx]
+                has_intermediate_veto = any(
+                    not entry.get("autoupdate", True)
+                    and version_key(b_entry["version"])
+                    < version_key(entry["version"])
+                    <= version_key(c_entry["version"])
+                    for entry in entries
+                )
+                if not has_intermediate_veto:
+                    return b_entry, c_entry
+
     candidate = (
         unique.get(version_key(candidate_version)) if candidate_version else ordered[-1]
     )
@@ -603,7 +642,7 @@ def main():
     parser.add_argument("--arch", default=detect_platform()[1])
     parser.add_argument("--manifest", type=Path, default=None)
     parser.add_argument(
-        "--baseline-version", default="1.7.1", help="Installed release to upgrade from"
+        "--baseline-version", default=None, help="Installed release to upgrade from"
     )
     parser.add_argument(
         "--candidate-version",
