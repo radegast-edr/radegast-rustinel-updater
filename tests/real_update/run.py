@@ -337,6 +337,81 @@ def wait_sensor_pid(os_name, timeout=30):
             time.sleep(1)
 
 
+def ensure_log_permissions(os_name):
+    if os_name == "mac":
+        log_dir = Path("/Library/Logs/Radegast")
+        if log_dir.exists():
+            subprocess.run(
+                ["chmod", "2750", str(log_dir)],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["chown", "-R", ":_radegast", str(log_dir)],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["chmod", "-R", "g+rX", str(log_dir)],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "chmod",
+                    "+a",
+                    "group:_radegast allow read,readattr,readextattr,readsecurity,file_inherit",
+                    str(log_dir),
+                ],
+                check=False,
+                capture_output=True,
+            )
+            for path in log_dir.glob("alerts.json*"):
+                try:
+                    mode = path.stat().st_mode
+                    if mode & 0o040 == 0:
+                        path.chmod(mode | 0o640)
+                except OSError:
+                    pass
+    elif os_name == "linux":
+        for dir_str in ("/var/log/radegast", "/opt/radegast/logs"):
+            log_dir = Path(dir_str)
+            if log_dir.exists():
+                subprocess.run(
+                    ["chmod", "2750", str(log_dir)],
+                    check=False,
+                    capture_output=True,
+                )
+                for path in log_dir.glob("alerts.json*"):
+                    try:
+                        mode = path.stat().st_mode
+                        if mode & 0o040 == 0:
+                            path.chmod(mode | 0o640)
+                    except OSError:
+                        pass
+
+
+@contextlib.contextmanager
+def log_permission_enforcer(os_name):
+    if os_name not in ("mac", "linux"):
+        yield
+        return
+
+    stop_event = threading.Event()
+
+    def _loop():
+        while not stop_event.is_set():
+            ensure_log_permissions(os_name)
+            stop_event.wait(0.5)
+
+    thread = threading.Thread(target=_loop, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+
+
 def agent_control(os_name, start):
     if os_name == "linux":
         checked(["systemctl", "start" if start else "stop", "radegast-agent"])
@@ -352,21 +427,7 @@ def agent_control(os_name, start):
         plist = "/Library/LaunchDaemons/app.radegast.agent.plist"
         label = "app.radegast.agent"
         if start:
-            log_dir = Path("/Library/Logs/Radegast")
-            if log_dir.exists():
-                subprocess.run(
-                    ["chmod", "2750", str(log_dir)],
-                    check=False,
-                    capture_output=True,
-                )
-                alerts_file = log_dir / "alerts.json"
-                if alerts_file.exists():
-                    subprocess.run(
-                        ["chmod", "640", str(alerts_file)],
-                        check=False,
-                        capture_output=True,
-                    )
-
+            ensure_log_permissions("mac")
             subprocess.run(
                 ["chown", "root:wheel", plist],
                 check=False,
@@ -568,90 +629,91 @@ def run(args):
         harness.execute_installation(
             backend.base_url, token, baseline["version"], args.os, args.output
         )
-        binary = installation_root(args.os) / (
-            "rustinel/rustinel/rustinel.exe"
-            if args.os == "windows"
-            else "rustinel/rustinel"
-        )
-        harness.verify_services_running(args.os)
-        verify_installed(binary, baseline)
-        result["stage"] = "observe baseline healthcheck"
-        result["baseline_healthy"] = baseline_health(
-            backend.db_path, device, args.timeout
-        )
-        result["scenario"] = (
-            "healthy upgrade"
-            if result["baseline_healthy"]
-            else "unhealthy baseline recovery"
-        )
-        print(
-            f"Baseline health: {result['baseline_healthy']}; testing {result['scenario']}",
-            flush=True,
-        )
-        result["checks"].append(
-            "baseline installation and completed native healthcheck"
-        )
-        previous_pid = sensor_pid(args.os)
-        # Serve one verified candidate so later upstream publications cannot change this run.
-        candidate_entry = json.loads((args.assets / "candidate.json").read_text())
-        manifest_dir = args.output / "http"
-        manifest_dir.mkdir(exist_ok=True)
-        manifest = manifest_dir / "update-manifest.json"
-        snapshot = json.loads((args.assets / "snapshot.json").read_text())
-        bad_snapshot = [
-            dict(entry, sign_gpg="invalid signature")
-            if entry["version"] == candidate_entry["version"]
-            else entry
-            for entry in snapshot
-        ]
-        manifest.write_text(json.dumps(bad_snapshot), encoding="utf-8")
-        with serve(manifest_dir) as server:
-            url = server + "/update-manifest.json"
-            result["stage"] = "reject tampered update"
-            run_updater(args, url, backend.base_url, binary, "tampered", False)
+        with log_permission_enforcer(args.os):
+            binary = installation_root(args.os) / (
+                "rustinel/rustinel/rustinel.exe"
+                if args.os == "windows"
+                else "rustinel/rustinel"
+            )
+            harness.verify_services_running(args.os)
             verify_installed(binary, baseline)
-            if sensor_pid(args.os) != previous_pid:
-                raise RuntimeError("Rejected update disrupted the running sensor")
-            result["checks"].append(
-                "tampered signature rejected without service disruption"
+            result["stage"] = "observe baseline healthcheck"
+            result["baseline_healthy"] = baseline_health(
+                backend.db_path, device, args.timeout
             )
-            # Discard all prior health state. A freshly started agent generates a new
-            # probe UUID, so a cached healthy=True or old queued alert cannot pass.
-            agent_control(args.os, False)
-            with contextlib.closing(sqlite3.connect(backend.db_path)) as db, db:
-                db.execute("UPDATE devices SET healthy = NULL WHERE id = ?", (device,))
-            manifest.write_text(json.dumps(snapshot), encoding="utf-8")
-            result["stage"] = "apply real signed update"
-            run_updater(args, url, backend.base_url, binary, "upgrade", True)
-            verify_installed(binary, candidate)
-            new_pid = wait_sensor_pid(args.os)
-            if new_pid == previous_pid:
-                raise RuntimeError("Updater did not restart the sensor")
-            result["checks"].append(
-                "signed upgrade, exact installed bytes, version, and new service PID"
+            result["scenario"] = (
+                "healthy upgrade"
+                if result["baseline_healthy"]
+                else "unhealthy baseline recovery"
             )
-            result["stage"] = "fresh post-update healthcheck"
-            agent_control(args.os, True)
-            harness.verify_services_running(args.os)
-            if not harness.verify_healthcheck_alert(
-                backend.base_url, session, device, timeout_seconds=args.timeout
-            ):
-                raise RuntimeError("Updated sensor failed its fresh native healthcheck")
-            time.sleep(5)
-            harness.verify_services_running(args.os)
-            if sensor_pid(args.os) != new_pid:
-                raise RuntimeError(
-                    "Updated sensor restarted unexpectedly during healthcheck"
+            print(
+                f"Baseline health: {result['baseline_healthy']}; testing {result['scenario']}",
+                flush=True,
+            )
+            result["checks"].append(
+                "baseline installation and completed native healthcheck"
+            )
+            previous_pid = sensor_pid(args.os)
+            # Serve one verified candidate so later upstream publications cannot change this run.
+            candidate_entry = json.loads((args.assets / "candidate.json").read_text())
+            manifest_dir = args.output / "http"
+            manifest_dir.mkdir(exist_ok=True)
+            manifest = manifest_dir / "update-manifest.json"
+            snapshot = json.loads((args.assets / "snapshot.json").read_text())
+            bad_snapshot = [
+                dict(entry, sign_gpg="invalid signature")
+                if entry["version"] == candidate_entry["version"]
+                else entry
+                for entry in snapshot
+            ]
+            manifest.write_text(json.dumps(bad_snapshot), encoding="utf-8")
+            with serve(manifest_dir) as server:
+                url = server + "/update-manifest.json"
+                result["stage"] = "reject tampered update"
+                run_updater(args, url, backend.base_url, binary, "tampered", False)
+                verify_installed(binary, baseline)
+                if sensor_pid(args.os) != previous_pid:
+                    raise RuntimeError("Rejected update disrupted the running sensor")
+                result["checks"].append(
+                    "tampered signature rejected without service disruption"
                 )
-            result["checks"].append(
-                "fresh post-update sensor-to-agent-to-backend healthcheck"
-            )
-            result["stage"] = "repeat update is a no-op"
-            run_updater(args, url, backend.base_url, binary, "noop", True)
-            verify_installed(binary, candidate)
-            if sensor_pid(args.os) != new_pid:
-                raise RuntimeError("No-op update restarted the sensor")
-            result["checks"].append("repeat update preserves binary and service PID")
+                # Discard all prior health state. A freshly started agent generates a new
+                # probe UUID, so a cached healthy=True or old queued alert cannot pass.
+                agent_control(args.os, False)
+                with contextlib.closing(sqlite3.connect(backend.db_path)) as db, db:
+                    db.execute("UPDATE devices SET healthy = NULL WHERE id = ?", (device,))
+                manifest.write_text(json.dumps(snapshot), encoding="utf-8")
+                result["stage"] = "apply real signed update"
+                run_updater(args, url, backend.base_url, binary, "upgrade", True)
+                verify_installed(binary, candidate)
+                new_pid = wait_sensor_pid(args.os)
+                if new_pid == previous_pid:
+                    raise RuntimeError("Updater did not restart the sensor")
+                result["checks"].append(
+                    "signed upgrade, exact installed bytes, version, and new service PID"
+                )
+                result["stage"] = "fresh post-update healthcheck"
+                agent_control(args.os, True)
+                harness.verify_services_running(args.os)
+                if not harness.verify_healthcheck_alert(
+                    backend.base_url, session, device, timeout_seconds=args.timeout
+                ):
+                    raise RuntimeError("Updated sensor failed its fresh native healthcheck")
+                time.sleep(5)
+                harness.verify_services_running(args.os)
+                if sensor_pid(args.os) != new_pid:
+                    raise RuntimeError(
+                        "Updated sensor restarted unexpectedly during healthcheck"
+                    )
+                result["checks"].append(
+                    "fresh post-update sensor-to-agent-to-backend healthcheck"
+                )
+                result["stage"] = "repeat update is a no-op"
+                run_updater(args, url, backend.base_url, binary, "noop", True)
+                verify_installed(binary, candidate)
+                if sensor_pid(args.os) != new_pid:
+                    raise RuntimeError("No-op update restarted the sensor")
+                result["checks"].append("repeat update preserves binary and service PID")
         result.update(status="PASS", stage="complete")
     except Exception as error:  # noqa: BLE001 - persist stage and traceback on every test failure
         result["error"] = str(error)
